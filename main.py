@@ -2431,12 +2431,13 @@ async def adm_ad_ok(call: CallbackQuery):
 
     # Reklama beruvchiga xabar
     try:
+        kanal_note = '👁 Kanal postini korishlar soni uchun: @xazdent' if chan_msg_id else ''
         await bot.send_message(uid,
             f"✅ *E\'loningiz tasdiqlandi!*\n\n"
             f"📢 Kanal: @xazdent\n"
             f"📨 {sent} ta foydalanuvchiga yuborildi\n"
             f"💰 -{total:.0f} ball ayirildi\n\n"
-            f"{'👁 Kanal postini ko\'rishlar soni uchun: @xazdent' if chan_msg_id else ''}"
+            f"{kanal_note}"
         )
     except Exception: pass
 
