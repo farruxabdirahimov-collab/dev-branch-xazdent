@@ -1,4 +1,5 @@
 import asyncio
+import re
 import os
 import logging
 from datetime import datetime, timedelta
@@ -35,7 +36,7 @@ log = logging.getLogger(__name__)
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@xazdent")
 ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 
 # E'lon narxlari (ball)
@@ -324,6 +325,43 @@ async def cmd_start(msg: Message, state: FSMContext):
 
     # Deep link: /start offer_42 yoki /start batch_5
     args = msg.text.split(maxsplit=1)[1] if " " in (msg.text or "") else ""
+    # Mahsulot deep link: /start p_123 yoki /start xd_XD00005
+    if args.startswith("xz_") or args.startswith("xd_"):
+        try:
+            code = args[3:].upper()
+            prod = await db_get(
+                "SELECT id FROM products WHERE UPPER(article_code)=? AND is_active=1",
+                (code,)
+            )
+            if prod:
+                if u and u["role"] not in (None, "none", ""):
+                    await _show_product_start(msg, prod["id"])
+                    return
+                else:
+                    await state.update_data(pending_product_id=prod["id"])
+        except Exception as e:
+            log.error(f"xd_ deep link xato: {e}")
+
+    if args.startswith("p_"):
+        try:
+            pid = int(args[2:])
+            if u and u["role"] not in (None, "none", ""):
+                # Ro'yxatdan o'tgan — mahsulotni ko'rsatamiz
+                await _show_product_start(msg, pid)
+                return
+            else:
+                # Ro'yxatdan o'tmagan — eslab qolamiz, keyin ko'rsatamiz
+                await state.update_data(pending_product_id=pid)
+                # Ro'yxatdan o'tishni boshlaymiz
+                await msg.answer(
+                    "🦷 *XazDent Dental Market*\n\n"
+                    "Mahsulotni ko\'rish uchun avval\n"
+                    "ro\'yxatdan o\'ting — 30 soniya!",
+                )
+                # Standart registration flow
+        except Exception as e:
+            log.error(f"p_ deep link xato: {e}")
+
     if args.startswith("offer_") and u and u["role"] in ("seller",):
         try:
             nid = int(args.split("_")[1])
@@ -352,6 +390,14 @@ async def cmd_start(msg: Message, state: FSMContext):
             log.error(f"batch deep link xato: {e}")
 
     if u and u["role"] not in (None, "none", ""):
+        # Pending product — ulashilgan mahsulot
+        d = await state.get_data()
+        pending_pid = d.get("pending_product_id")
+        if pending_pid:
+            await state.update_data(pending_product_id=None)
+            await _show_product_start(msg, pending_pid)
+            return
+
         lg  = u["lang"] or "uz"
         kb   = kb_clinic(lg) if u["role"] in ("clinic", "zubtex") else kb_seller(lg)
         role = u["role"]
@@ -369,15 +415,30 @@ async def cmd_start(msg: Message, state: FSMContext):
             else:
                 await msg.answer(txt, reply_markup=kb)
         else:
-            txt = "🛒 *Sotuvchi paneli*"
+            shop = await db_get("SELECT * FROM shops WHERE owner_id=? AND status='active'", (uid,))
+            avg = await db_get("SELECT AVG(rating) as a, COUNT(*) as c FROM reviews WHERE seller_id=?", (uid,))
+            prod_count = (await db_get("SELECT COUNT(*) as c FROM products WHERE shop_id=(SELECT id FROM shops WHERE owner_id=? LIMIT 1) AND is_active=1", (uid,)))["c"] if shop else 0
+            deal_count = shop["total_deals"] if shop else 0
+            rating = float(avg["a"] or 0) if avg else 0
+            stars = ("⭐ %.1f" % rating) if rating > 0 else "⭐ Yangi do\'kon"
+
+            shop_name = shop["shop_name"] if shop else "Do\'koningiz"
+            region = shop["region"] if shop else ""
+
+            txt = (
+                f"🏪 *{shop_name}*\n"
+                f"📍 {region} · {stars}\n"
+                f"📦 {prod_count} ta mahsulot · 🤝 {deal_count} ta bitim"
+            )
             if WEBAPP_URL:
                 mkt_url = f"{WEBAPP_URL}/catalog?uid={uid}&role=seller"
-                inline_kb = ik([ib("🛍 Dental Market — Do\'koningiz →", web_app=WebAppInfo(url=mkt_url))])
-                await msg.answer(txt, reply_markup=kb)
-                await msg.answer(
-                    "🛍 *Dental Market*\n_Do\'koningizni boshqaring_",
-                    reply_markup=inline_kb
+                add_url = f"{WEBAPP_URL}/catalog?uid={uid}&role=seller&action=add"
+                inline_kb = ik(
+                    [ib("🛍 MY Dental Market", web_app=WebAppInfo(url=mkt_url))],
+                    [ib("➕ Mahsulot qo\'shish", web_app=WebAppInfo(url=add_url))],
                 )
+                await msg.answer(txt, reply_markup=kb)
+                await msg.answer("👆 Do\'koningizni boshqaring:", reply_markup=inline_kb)
             else:
                 await msg.answer(txt, reply_markup=kb)
         return
@@ -1839,6 +1900,12 @@ async def my_shop(msg: Message):
     if add_url:
         kb_rows.append([ib("➕ Mahsulot qo\'shish", web_app=WebAppInfo(url=add_url+"&action=add"))])
     kb_rows.append([ib("📦 Mahsulotlarim (" + str(prod_count) + " ta)", "shop_products")])
+    # Guruh holati
+    group_id = shop.get("group_chat_id")
+    if group_id:
+        kb_rows.append([ib("👥 Guruh bog\'langan ✅", "group_info")])
+    else:
+        kb_rows.append([ib("👥 Guruh ulash (buyurtmalar uchun)", "group_howto")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
     rating = float(shop["rating"] or 0)
     stars = ""
@@ -1912,6 +1979,32 @@ async def shop_name(msg: Message, state: FSMContext):
         except Exception:
             pass
     await msg.answer("⏳ Do'kon admin tasdiqlashini kutmoqda.")
+
+@router.callback_query(F.data == "group_info")
+async def cb_group_info(call: CallbackQuery):
+    uid  = call.from_user.id
+    shop = await db_get("SELECT * FROM shops WHERE owner_id=?", (uid,))
+    gid  = shop["group_chat_id"] if shop else None
+    await call.message.answer(
+        f"👥 *Guruh bog\'langan*\n\n"
+        f"Guruh ID: `{gid}`\n\n"
+        f"Guruh bog\'liqligini o\'chirish uchun:\n"
+        f"Guruhda /unsetgroup yozing"
+    )
+    await call.answer()
+
+@router.callback_query(F.data == "group_howto")
+async def cb_group_howto(call: CallbackQuery):
+    await call.message.answer(
+        "👥 *Guruh ulash — Qo\'llanma*\n\n"
+        "1️⃣ Telegram da yangi guruh oching\n"
+        "2️⃣ @XazdentBot ni guruhga qo\'shing\n"
+        "3️⃣ Botni *Admin* qiling\n"
+        "4️⃣ Guruhda /setgroup yozing\n\n"
+        "✅ Shundan keyin barcha buyurtmalar guruhga chiqadi.\n"
+        "Jamoangizdаn birinchi javob bergan xodim buyurtmani oladi."
+    )
+    await call.answer()
 
 @router.callback_query(F.data.startswith("shopok_"))
 async def shop_ok(call: CallbackQuery):
@@ -2431,13 +2524,12 @@ async def adm_ad_ok(call: CallbackQuery):
 
     # Reklama beruvchiga xabar
     try:
-        kanal_note = '👁 Kanal postini korishlar soni uchun: @xazdent' if chan_msg_id else ''
         await bot.send_message(uid,
             f"✅ *E\'loningiz tasdiqlandi!*\n\n"
             f"📢 Kanal: @xazdent\n"
             f"📨 {sent} ta foydalanuvchiga yuborildi\n"
             f"💰 -{total:.0f} ball ayirildi\n\n"
-            f"{kanal_note}"
+            f"{'👁 Kanal postini ko\'rishlar soni uchun: @xazdent' if chan_msg_id else ''}"
         )
     except Exception: pass
 
@@ -2479,6 +2571,23 @@ async def ad_cancel(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 # ── TAKLIF QABUL HELPER FUNKSIYALAR ─────────────────────────────────────────
+
+async def _send_order_to_group(shop, order_id: int, msg_txt: str,
+                               buyer_id: int, total: float):
+    """Agar do'konda guruh bog'liq bo'lsa, guruhga ham yuboradi."""
+    if not shop or not shop.get("group_chat_id"):
+        return
+    group_id = shop["group_chat_id"]
+    claim_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="✋ Men olaman",
+            callback_data=f"claim_order_{order_id}"
+        )
+    ]])
+    try:
+        await bot.send_message(group_id, msg_txt, reply_markup=claim_kb)
+    except Exception as e:
+        log.error(f"Guruhga yuborish xato: {e}")
 
 async def _notify_winner(seller_id: int, clinic: dict, items: list):
     """G'olib sotuvchiga to'liq xabar: mahsulotlar + klinika ma'lumoti."""
@@ -3368,6 +3477,674 @@ async def delivery_checker():
         except Exception as e:
             log.error(f"delivery_checker xato: {e}")
 
+# ── MAHSULOT ULASHISH VA TEZKOR BUYURTMA ─────────────────────────────────────
+
+async def _show_product_start(msg: Message, pid: int):
+    """Deep link orqali kelgan foydalanuvchiga mahsulotni ko'rsatish."""
+    prod = await db_get(
+        "SELECT p.*, s.shop_name, s.owner_id as seller_id, u.region "
+        "FROM products p "
+        "JOIN shops s ON p.shop_id=s.id "
+        "JOIN users u ON s.owner_id=u.id "
+        "WHERE p.id=? AND p.is_active=1",
+        (pid,)
+    )
+    if not prod:
+        await msg.answer("❌ Mahsulot topilmadi yoki o\'chirilgan.")
+        return
+
+    stars = ""
+    avg = await db_get(
+        "SELECT AVG(rating) as a, COUNT(*) as c FROM reviews WHERE seller_id=?",
+        (prod["seller_id"],)
+    )
+    if avg and avg["a"]:
+        rating = float(avg["a"])
+        stars = "⭐" * round(rating) + f" ({rating:.1f})"
+
+    txt = (
+        f"🦷 *{prod['name']}*\n\n"
+        f"💰 *{prod['price']:,.0f} so\'m / {prod['unit']}*\n"
+        f"🏪 {prod['shop_name']}\n"
+        f"📍 {prod['region'] or '—'}\n"
+        + (f"⭐ {stars}\n" if stars else "") +
+        (f"\n_{prod['description']}_" if prod.get("description") else "")
+    )
+    kb = ik(
+        [ib("⚡ Tezkor buyurtma", f"qorder_{pid}_{prod['seller_id']}")],
+        [ib("🔳 QR kod olish", f"get_qr_{pid}"),
+         ib("📤 Ulashish", f"share_prod_{pid}")],
+    )
+    # Rasm bor bo'lsa
+    photo = await db_get(
+        "SELECT file_id FROM product_photos WHERE product_id=? ORDER BY sort_order LIMIT 1",
+        (pid,)
+    )
+    if photo:
+        try:
+            await msg.answer_photo(photo["file_id"], caption=txt, reply_markup=kb)
+            return
+        except Exception: pass
+    await msg.answer(txt, reply_markup=kb)
+
+class QuickOrderState(StatesGroup):
+    waiting_qty = State()
+
+@router.callback_query(F.data.startswith("qorder_"))
+async def quick_order_start(call: CallbackQuery, state: FSMContext):
+    """Tezkor buyurtma — savatga solmasdan."""
+    parts     = call.data.split("_")
+    pid       = int(parts[1])
+    seller_id = int(parts[2])
+    uid       = call.from_user.id
+    u         = await get_user(uid)
+
+    if not u or u["role"] in (None, "none", ""):
+        await call.answer("⚠️ Avval ro\'yxatdan o\'ting!", show_alert=True)
+        return
+    if u["role"] == "seller":
+        await call.answer("⚠️ Sotuvchilar buyurtma bera olmaydi!", show_alert=True)
+        return
+
+    prod = await db_get("SELECT * FROM products WHERE id=?", (pid,))
+    if not prod:
+        await call.answer("Mahsulot topilmadi", show_alert=True)
+        return
+
+    await state.set_state(QuickOrderState.waiting_qty)
+    await state.update_data(qo_pid=pid, qo_seller=seller_id,
+                            qo_name=prod["name"], qo_price=prod["price"],
+                            qo_unit=prod["unit"])
+    await call.message.answer(
+        f"⚡ *Tezkor buyurtma*\n\n"
+        f"📦 *{prod['name']}*\n"
+        f"💰 {prod['price']:,.0f} so\'m/{prod['unit']}\n\n"
+        f"Nechta kerak?",
+        reply_markup=ik(
+            [ib("1", "qoq_1"), ib("2", "qoq_2"), ib("3", "qoq_3"),
+             ib("5", "qoq_5"), ib("10", "qoq_10")],
+            [ib("✏️ O\'zim kiritaman", "qoq_custom")],
+            [ib("✖️ Bekor", "qoq_cancel")],
+        )
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("qoq_"), QuickOrderState.waiting_qty)
+async def quick_order_qty(call: CallbackQuery, state: FSMContext):
+    action = call.data[4:]
+    if action == "cancel":
+        await state.clear()
+        await call.message.edit_text("❌ Bekor qilindi.")
+        await call.answer()
+        return
+    if action == "custom":
+        await call.message.answer(
+            "Miqdorni kiriting (raqam):\n/cancel — bekor"
+        )
+        await call.answer()
+        return
+    qty = int(action)
+    await _send_quick_order(call.message, state, qty, call.from_user.id)
+    await call.answer()
+
+@router.message(QuickOrderState.waiting_qty, F.text)
+async def quick_order_qty_text(msg: Message, state: FSMContext):
+    if msg.text and msg.text.startswith("/"):
+        await state.clear()
+        await msg.answer("❌ Bekor qilindi.")
+        return
+    try:
+        qty = float(msg.text.replace(",", "."))
+        if qty <= 0: raise ValueError
+    except ValueError:
+        await msg.answer("⚠️ To\'g\'ri raqam kiriting.")
+        return
+    await _send_quick_order(msg, state, qty, msg.from_user.id)
+
+async def _send_quick_order(target_msg, state: FSMContext, qty: float, buyer_id: int):
+    d         = await state.get_data()
+    pid       = d.get("qo_pid")
+    seller_id = d.get("qo_seller")
+    name      = d.get("qo_name", "?")
+    price     = d.get("qo_price", 0)
+    unit      = d.get("qo_unit", "dona")
+    total     = price * qty
+    await state.clear()
+
+    u      = await get_user(buyer_id)
+    uname  = (u["clinic_name"] or u["full_name"] or str(buyer_id)) if u else str(buyer_id)
+    uphone = u["phone"] if u else "—"
+    uregion= u["region"] if u else "—"
+    uaddr  = u["address"] if u else "—"
+
+    # catalog_orders ga yozamiz
+    import json as _pj
+    items = [{"name": name, "qty": qty, "price": price, "unit": unit, "subtotal": total}]
+    order_id = await db_insert(
+        "INSERT INTO catalog_orders(buyer_id,seller_id,products_json,total_amount) VALUES(?,?,?,?)",
+        (buyer_id, seller_id, _pj.dumps(items, ensure_ascii=False), total)
+    )
+
+    msg_txt = (
+        f"⚡ *Tezkor buyurtma #{order_id}!*\n\n"
+        f"📦 *{name}* — {qty} {unit}\n"
+        f"💰 {price:,.0f} × {qty} = *{total:,.0f} so\'m*\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏥 *{uname}*\n"
+        f"📞 {uphone}\n"
+        f"📍 {uregion}\n"
+        f"🏠 {uaddr}"
+    )
+    confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Qabul qildim",
+                             callback_data=f"co_confirm_{order_id}_{buyer_id}"),
+        InlineKeyboardButton(text="❌ Mavjud emas",
+                             callback_data=f"co_reject_{order_id}_{buyer_id}")
+    ]])
+    try:
+        await bot.send_message(seller_id, msg_txt, reply_markup=confirm_kb)
+    except Exception as e:
+        log.error(f"Quick order notify xato: {e}")
+
+    # Guruhga ham
+    shop_g = await db_get("SELECT * FROM shops WHERE owner_id=?", (seller_id,))
+    await _send_order_to_group(
+        dict(shop_g) if shop_g else None,
+        order_id, msg_txt, buyer_id, total
+    )
+
+    await target_msg.answer(
+        f"✅ *Buyurtma #{order_id} yuborildi!*\n\n"
+        f"📦 {name} — {qty} {unit}\n"
+        f"💰 *{total:,.0f} so\'m*\n\n"
+        f"Sotuvchi tez orada bog\'lanadi."
+    )
+
+# ── ARTIKUL VA QR KOD TIZIMI ─────────────────────────────────────────────────
+
+async def _generate_article_code() -> str:
+    """XD00001 dan boshlanadi, to'lganda avtomatik uzayadi."""
+    row = await db_get(
+        "SELECT article_code FROM products "
+        "WHERE article_code IS NOT NULL "
+        "ORDER BY LENGTH(article_code) DESC, article_code DESC LIMIT 1"
+    )
+    if row and row["article_code"]:
+        try:
+            last_num = int(row["article_code"][2:])
+            next_num = last_num + 1
+            # Minimum 5 xona, kerak bo'lsa uzayadi
+            digits = max(5, len(str(next_num)))
+            return f"XZ{next_num:0{digits}d}"
+        except Exception:
+            pass
+    return "XZ00001"
+
+def _generate_qr_bytes(url: str, label: str = "") -> bytes:
+    """QR kod PNG — ichida artikul kodi yozilgan."""
+    import qrcode
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    if label:
+        # QR ostiga matn qo'shamiz
+        qr_w, qr_h = qr_img.size
+        txt_h = 48  # Matn uchun joy
+        final = Image.new("RGB", (qr_w, qr_h + txt_h), "white")
+        final.paste(qr_img, (0, 0))
+        draw = ImageDraw.Draw(final)
+        # Font — standart
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        except Exception:
+            font = ImageFont.load_default()
+        # Matnni markazga joylash
+        bbox = draw.textbbox((0, 0), label, font=font)
+        txt_w = bbox[2] - bbox[0]
+        x = (qr_w - txt_w) // 2
+        y = qr_h + 8
+        draw.text((x, y), label, fill="black", font=font)
+    else:
+        final = qr_img
+
+    buf = io.BytesIO()
+    final.save(buf, format="PNG")
+    return buf.getvalue()
+
+async def _send_product_qr(user_id: int, product_id: int):
+    """Foydalanuvchiga mahsulot QR kodini yuboradi."""
+    prod = await db_get("SELECT * FROM products WHERE id=?", (product_id,))
+    if not prod:
+        return
+    code = prod["article_code"] or f"p_{product_id}"
+    url  = f"https://t.me/XazdentBot?start=xd_{code}"
+    try:
+        qr_bytes = _generate_qr_bytes(url, label=code)
+        caption  = (
+            f"🔳 *{prod['name']}* QR kodi\n\n"
+            f"📌 Artikul: *{code}*\n"
+            f"🔗 Havola: `{url}`\n\n"
+            f"_Instagram postga joylashtiring — "
+            f"mijozlar skan qilib buyurtma beradi_"
+        )
+        await bot.send_photo(
+            user_id,
+            BufferedInputFile(qr_bytes, filename=f"{code}_qr.png"),
+            caption=caption
+        )
+    except Exception as e:
+        log.error(f"QR yuborish xato: {e}")
+
+# ── HASHTAG QIDIRISH (#XD00005 yoki XD00005) ─────────────────────────────────
+@router.message(F.text.regexp(r'(?i)^#?X[DZ]\d+$'))
+async def search_by_article(msg: Message):
+    """XD00005 yoki #XD00005 yozilganda mahsulotni topadi."""
+    code = msg.text.strip().lstrip("#").upper()
+    # XD ham XZ sifatida qabul qilish
+    if code.startswith("XD"): code = "XZ" + code[2:]
+    prod = await db_get(
+        "SELECT p.*, s.shop_name, s.owner_id as seller_id, u.region "
+        "FROM products p "
+        "JOIN shops s ON p.shop_id=s.id "
+        "JOIN users u ON s.owner_id=u.id "
+        "WHERE UPPER(p.article_code)=? AND p.is_active=1",
+        (code,)
+    )
+    if not prod:
+        await msg.answer(
+            f"❌ *{code}* artikul topilmadi.\n\n"
+            f"To\'g\'ri yozing: XD00005"
+        )
+        return
+    await _show_product_start(msg, prod["id"])
+
+# ── /start xd_XD00005 — QR skan ──────────────────────────────────────────────
+# (bu _show_product_start ichida ishlaydi, start handlerda qo'shamiz)
+
+# ── Sotuvchi QR buyrug'i ──────────────────────────────────────────────────────
+@router.message(F.text.startswith("/qr_"))
+async def cmd_qr(msg: Message):
+    """Sotuvchi /qr_5 yozsa mahsulot QR kodini oladi."""
+    if not msg.text: return
+    try:
+        pid = int(msg.text.split("_")[1])
+    except Exception:
+        await msg.answer("Format: /qr_5 (mahsulot ID)")
+        return
+    prod = await db_get("SELECT shop_id FROM products WHERE id=?", (pid,))
+    if not prod: await msg.answer("❌ Topilmadi"); return
+    shop = await db_get("SELECT owner_id FROM shops WHERE id=?", (prod["shop_id"],))
+    if not shop or shop["owner_id"] != msg.from_user.id:
+        await msg.answer("❌ Bu sizning mahsulotingiz emas"); return
+    await msg.answer("⏳ QR kod tayyorlanmoqda...")
+    await _send_product_qr(msg.from_user.id, pid)
+
+@router.callback_query(F.data.startswith("get_qr_"))
+async def cb_get_qr(call: CallbackQuery):
+    """Mahsulot QR kodini botda yuboradi."""
+    pid = int(call.data[7:])
+    await call.answer("⏳ QR tayyorlanmoqda...")
+    await _send_product_qr(call.from_user.id, pid)
+
+@router.callback_query(F.data.startswith("share_prod_"))
+async def cb_share_prod(call: CallbackQuery):
+    """Mahsulot havolasi + QR ni ulashish."""
+    pid  = int(call.data[11:])
+    prod = await db_get("SELECT * FROM products WHERE id=?", (pid,))
+    if not prod:
+        await call.answer("Topilmadi", show_alert=True)
+        return
+    code = prod["article_code"] or f"p_{pid}"
+    url  = f"https://t.me/XazdentBot?start=xd_{code}"
+
+    # Havolani yuboradi
+    await call.message.answer(
+        f"📤 *Mahsulot havolasi:*\n\n"
+        f"🦷 *{prod['name']}*\n"
+        f"📌 Artikul: *{code}*\n"
+        f"🔗 `{url}`\n\n"
+        f"_Bu havolani do\'stlaringizga yuboring yoki\n"
+        f"Instagram posta qo\'shing: #{code}_"
+    )
+    # QR ham yuboradi
+    await _send_product_qr(call.from_user.id, pid)
+    await call.answer()
+
+# ── GURUH TIZIMI ─────────────────────────────────────────────────────────────
+
+@router.message(F.text == "/setgroup")
+async def cmd_setgroup(msg: Message):
+    """Guruhda yozilganda shu guruhni do'konga bog'laydi."""
+    if msg.chat.type not in ("group", "supergroup"):
+        await msg.answer(
+            "⚠️ Bu buyruq faqat guruhda ishlaydi.\n\n"
+            "Qanday qilish:\n"
+            "1. Guruh oching\n"
+            "2. Botni guruhga qo'shing (@XazdentBot)\n"
+            "3. Botni admin qiling\n"
+            "4. Guruhda /setgroup yozing"
+        )
+        return
+    uid      = msg.from_user.id
+    group_id = msg.chat.id
+    shop     = await db_get(
+        "SELECT * FROM shops WHERE owner_id=? AND status='active'", (uid,)
+    )
+    if not shop:
+        await msg.answer("❌ Sizning aktiv do'koningiz topilmadi.")
+        return
+    await db_run(
+        "UPDATE shops SET group_chat_id=? WHERE owner_id=?",
+        (group_id, uid)
+    )
+    await msg.answer(
+        f"✅ *{shop['shop_name']}* do'koni shu guruhga bog'landi!\n\n"
+        f"Bundan keyin barcha buyurtmalar shu guruhga ham chiqadi.\n"
+        f"Guruh ID: `{group_id}`"
+    )
+
+@router.message(F.text == "/unsetgroup")
+async def cmd_unsetgroup(msg: Message):
+    """Guruh bog'liqligini o'chirish."""
+    uid  = msg.from_user.id
+    shop = await db_get("SELECT * FROM shops WHERE owner_id=?", (uid,))
+    if not shop:
+        await msg.answer("❌ Do'kon topilmadi.")
+        return
+    await db_run("UPDATE shops SET group_chat_id=NULL WHERE owner_id=?", (uid,))
+    await msg.answer("✅ Guruh bog'liqligi o'chirildi.")
+
+@router.callback_query(F.data.startswith("claim_"))
+async def claim_order(call: CallbackQuery):
+    """Guruh a'zosi buyurtmani o'z zimmasiga oladi."""
+    parts    = call.data.split("_")
+    order_id = int(parts[1])
+    claimer  = call.from_user.id
+    cname    = call.from_user.full_name or str(claimer)
+
+    order = await db_get("SELECT * FROM catalog_orders WHERE id=?", (order_id,))
+    if not order:
+        await call.answer("Buyurtma topilmadi", show_alert=True)
+        return
+    if order["claimed_by"]:
+        # Allaqachon birov olgan
+        prev = await get_user(order["claimed_by"])
+        pname = (prev["clinic_name"] or prev["full_name"] if prev else None) or "Boshqa xodim"
+        await call.answer(f"❌ {pname} allaqachon olgan!", show_alert=True)
+        return
+    if order["status"] != "pending":
+        await call.answer("Bu buyurtma allaqachon bajarilgan!", show_alert=True)
+        return
+
+    # Claim qilamiz
+    await db_run(
+        "UPDATE catalog_orders SET claimed_by=? WHERE id=? AND claimed_by IS NULL",
+        (claimer, order_id)
+    )
+    # Tekshiramiz — race condition uchun
+    updated = await db_get("SELECT claimed_by FROM catalog_orders WHERE id=?", (order_id,))
+    if updated["claimed_by"] != claimer:
+        prev = await get_user(updated["claimed_by"])
+        pname = (prev["clinic_name"] or prev["full_name"] if prev else None) or "Boshqa xodim"
+        await call.answer(f"❌ {pname} birozdan oldin oldi!", show_alert=True)
+        return
+
+    # Guruh xabarini yangilaymiz
+    shop = await db_get("SELECT * FROM shops WHERE owner_id=?", (order["seller_id"],))
+    shop_name = shop["shop_name"] if shop else "Do'kon"
+
+    import json as _pj
+    try:
+        items = _pj.loads(order["products_json"] or "[]")
+        prod_txt = "\n".join([
+            "  • " + str(it.get("name","")) + " " + str(it.get("size","") or "") +
+            " — " + str(it.get("qty",0)) + " " + str(it.get("unit","dona"))
+            for it in items[:5]
+        ])
+    except Exception:
+        prod_txt = "mahsulotlar"
+
+    try:
+        await call.message.edit_text(
+            call.message.text + f"\n\n✅ *{cname}* qabul qildi!",
+            reply_markup=None
+        )
+    except Exception: pass
+
+    # Xaridorga kompaniya nomidan xabar
+    buyer_id = order["buyer_id"]
+    u = await get_user(buyer_id)
+    uname = (u["clinic_name"] or u["full_name"] or str(buyer_id)) if u else str(buyer_id)
+
+    try:
+        await bot.send_message(
+            buyer_id,
+            f"✅ *Buyurtmangiz qabul qilindi!*\n\n"
+            f"🏪 *{shop_name}* jamoasi\n"
+            f"tez orada siz bilan bog\'lanadi.\n\n"
+            f"📦 {prod_txt}"
+        )
+    except Exception as e:
+        log.error(f"Claim buyer notify xato: {e}")
+
+    # Guruh a'zosiga xaridor kontakti
+    try:
+        await bot.send_message(
+            claimer,
+            f"📋 *Buyurtma #{order_id} — Sizning zimmaingizda*\n\n"
+            f"👤 Xaridor: *{uname}*\n"
+            f"📞 {u['phone'] if u else '—'}\n"
+            f"📍 {u['region'] if u else '—'}\n"
+            f"🏠 {u['address'] if u else '—'}\n\n"
+            f"📦 {prod_txt}\n\n"
+            f"💰 Jami: *{order['total_amount']:,.0f} so\'m*\n\n"
+            f"_Kompaniya nomidan muloqot qiling!_"
+        )
+    except Exception as e:
+        log.error(f"Claim claimer notify xato: {e}")
+
+    await call.answer(f"✅ Buyurtma #{order_id} sizda!")
+
+
+async def _post_order_to_group(order_id: int, shop: dict,
+                               products_txt: str, total: float,
+                               buyer_name: str, buyer_region: str):
+    """Buyurtmani do'kon guruhiga yuboradi."""
+    group_id = shop.get("group_chat_id")
+    if not group_id:
+        return
+    shop_name = shop.get("shop_name", "Do'kon")
+    msg_txt = (
+        f"🛒 *Yangi buyurtma #{order_id}!*\n\n"
+        f"📦 {products_txt}\n\n"
+        f"💰 *Jami: {total:,.0f} so\'m*\n\n"
+        f"🏥 *{buyer_name}*\n"
+        f"📍 {buyer_region}\n\n"
+        f"_Kim qabul qiladi?_"
+    )
+    claim_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="✋ Men olaman",
+            callback_data=f"claim_{order_id}"
+        )
+    ]])
+    try:
+        sent = await bot.send_message(group_id, msg_txt, reply_markup=claim_kb)
+        await db_run(
+            "UPDATE catalog_orders SET group_message_id=? WHERE id=?",
+            (sent.message_id, order_id)
+        )
+    except Exception as e:
+        log.error(f"Guruhga post xato (group={group_id}): {e}")
+
+# ── GURUH TIZIMI ─────────────────────────────────────────────────────────────
+
+@router.message(F.text == "/setgroup")
+async def cmd_setgroup(msg: Message):
+    """Guruhda yozilganda shu guruhni do'konga bog'laydi."""
+    if msg.chat.type not in ("group", "supergroup"):
+        await msg.answer(
+            "⚠️ Bu buyruq faqat guruhda ishlaydi!\n\n"
+            "1. Guruh oching\n"
+            "2. Botni guruhga qo\'shing (@XazdentBot)\n"
+            "3. Botni admin qiling\n"
+            "4. Guruhda /setgroup yozing"
+        )
+        return
+
+    uid      = msg.from_user.id
+    group_id = msg.chat.id
+    group_name = msg.chat.title or "Guruh"
+
+    # Bu user ning do'koni bormi?
+    shop = await db_get(
+        "SELECT * FROM shops WHERE owner_id=? AND status='active'", (uid,))
+    if not shop:
+        await msg.answer(
+            "❌ Sizning faol do\'koningiz topilmadi.\n"
+            "Avval @XazdentBot da do\'kon oching."
+        )
+        return
+
+    await db_run(
+        "UPDATE shops SET group_chat_id=? WHERE owner_id=?",
+        (group_id, uid)
+    )
+    await msg.answer(
+        f"✅ *{group_name}* guruhi\n"
+        f"🏪 *{shop['shop_name']}* do\'koniga bog\'landi!\n\n"
+        f"Bundan keyin barcha buyurtmalar shu guruhga ham chiqadi.\n"
+        f"_Buyurtmani qabul qilish uchun [✋ Men olaman] tugmasini bosing_"
+    )
+
+@router.message(F.text == "/removegroup")
+async def cmd_removegroup(msg: Message):
+    """Guruhni do'kondan ajratadi."""
+    uid = msg.from_user.id
+    shop = await db_get("SELECT * FROM shops WHERE owner_id=?", (uid,))
+    if not shop:
+        await msg.answer("❌ Do\'kon topilmadi")
+        return
+    await db_run("UPDATE shops SET group_chat_id=NULL WHERE owner_id=?", (uid,))
+    await msg.answer("✅ Guruh bog\'liqlik o\'chirildi")
+
+@router.callback_query(F.data.startswith("claim_order_"))
+async def claim_order(call: CallbackQuery):
+    """Guruh a'zosi buyurtmani o'z zimmasiga oladi."""
+    order_id  = int(call.data[12:])
+    claimer   = call.from_user.id
+    claimer_name = call.from_user.full_name or "Xodim"
+
+    # Allaqachon qabul qilinganmi?
+    order = await db_get(
+        "SELECT * FROM catalog_orders WHERE id=?", (order_id,))
+    if not order:
+        await call.answer("Buyurtma topilmadi", show_alert=True)
+        return
+    if order["claimed_by"]:
+        await call.answer(
+            "❌ Bu buyurtmani allaqachon boshqasi qabul qildi!",
+            show_alert=True)
+        return
+
+    # Claim qilamiz
+    await db_run(
+        "UPDATE catalog_orders SET claimed_by=?, "
+        "claimed_at=to_char(now(),'YYYY-MM-DD HH24:MI:SS') "
+        "WHERE id=? AND claimed_by IS NULL",
+        (claimer, order_id)
+    )
+
+    # Tekshiramiz — race condition bo'lmasin
+    updated = await db_get(
+        "SELECT claimed_by FROM catalog_orders WHERE id=?", (order_id,))
+    if not updated or updated["claimed_by"] != claimer:
+        await call.answer(
+            "❌ Bir soniya kech qoldingiz, boshqasi oldi!",
+            show_alert=True)
+        return
+
+    # Guruh xabarini yangilaymiz
+    import json as _pj
+    try:
+        items = _pj.loads(order["products_json"] or "[]")
+    except Exception:
+        items = []
+
+    lines_txt = ""
+    for it in items:
+        size = it.get("size") or it.get("variant") or ""
+        name = it.get("name","?")
+        qty  = it.get("qty", 1)
+        unit = it.get("unit","dona")
+        sub  = it.get("subtotal", 0)
+        if size:
+            lines_txt += f"• {name} ({size}) — {qty} {unit} · {sub:,.0f} so'm\n"
+        else:
+            lines_txt += f"• {name} — {qty} {unit} · {sub:,.0f} so'm\n"
+
+    # Guruhga yangilangan xabar
+    new_txt = (
+        f"📦 *Buyurtma #{order_id}*\n\n"
+        f"{lines_txt}\n"
+        f"💰 *Jami: {order['total_amount']:,.0f} so'm*\n\n"
+        f"✅ *{claimer_name}* qabul qildi!"
+    )
+    try:
+        await call.message.edit_text(new_txt, reply_markup=None)
+    except Exception:
+        pass
+
+    # Qabul qiluvchiga xaridor kontakti yuboramiz
+    buyer  = await get_user(order["buyer_id"])
+    shop   = await db_get(
+        "SELECT * FROM shops WHERE owner_id=?", (order["seller_id"],))
+    sname  = shop["shop_name"] if shop else "Do'kon"
+
+    if buyer:
+        uname   = buyer["clinic_name"] or buyer["full_name"] or str(order["buyer_id"])
+        uphone  = buyer["phone"] or "—"
+        uregion = buyer["region"] or "—"
+        uaddr   = buyer["address"] or "—"
+
+        contact_txt = (
+            f"✅ *Buyurtma #{order_id} sizga biriktirildi!*\n\n"
+            f"📦 *Buyurtma:*\n{lines_txt}\n"
+            f"💰 *Jami: {order['total_amount']:,.0f} so'm*\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *Xaridor:* {uname}\n"
+            f"📞 *Telefon:* {uphone}\n"
+            f"📍 *Hudud:* {uregion}\n"
+            f"🏠 *Manzil:* {uaddr}\n\n"
+            f"_Iltimos, {sname} kompaniyasi nomidan bog\'laning_"
+        )
+        try:
+            await bot.send_message(claimer, contact_txt)
+        except Exception as e:
+            log.error(f"Claim contact xato: {e}")
+
+    # Xaridorga ham xabar — kompaniya nomi bilan
+    try:
+        await bot.send_message(
+            order["buyer_id"],
+            f"✅ *Buyurtmangiz #{order_id} qabul qilindi!*\n\n"
+            f"🏪 *{sname}* xodimi tez orada siz bilan bog\'lanadi."
+        )
+    except Exception:
+        pass
+
+    await call.answer(f"✅ Qabul qildingiz! Xaridor kontakti yuborildi.")
+
 # ── FALLBACK ─────────────────────────────────────────────────────────────────
 @router.message()
 async def fallback(msg: Message, state: FSMContext):
@@ -3864,9 +4641,9 @@ async def start_webserver():
     async def _help_page(req):
         path = os.path.join(BASE_DIR, "webapp", "help.html")
         if os.path.exists(path):
-            return _web.FileResponse(path)
-        return _web.Response(text="help.html topilmadi", status=404,
-                             content_type="text/html")
+            with open(path, "r", encoding="utf-8") as f:
+                return _web.Response(text=f.read(), content_type="text/html", charset="utf-8")
+        return _web.Response(text="help.html topilmadi", status=404, content_type="text/html")
     app.router.add_get("/help", _help_page)
 
     async def _photo_proxy(req):
@@ -3892,6 +4669,29 @@ async def start_webserver():
             log.error(f"Photo proxy xato: {e}")
             return _web.Response(status=404)
     app.router.add_get("/api/photo/{file_id}", _photo_proxy)
+
+    async def _api_qr(req):
+        """Mahsulot QR kodi PNG."""
+        pid = int(req.match_info.get("product_id", 0))
+        prod = await db_get("SELECT * FROM products WHERE id=?", (pid,))
+        if not prod:
+            return _web.Response(status=404)
+        code = prod["article_code"] or f"p_{pid}"
+        url  = f"https://t.me/XazdentBot?start=xd_{code}"
+        try:
+            qr_bytes = _generate_qr_bytes(url, label=code)
+            return _web.Response(
+                body=qr_bytes,
+                content_type="image/png",
+                headers={
+                    "Cache-Control": "public, max-age=86400",
+                    "Content-Disposition": f'inline; filename="{code}.png"',
+                    "Access-Control-Allow-Origin": "*"
+                })
+        except Exception as e:
+            log.error(f"QR API xato: {e}")
+            return _web.Response(status=500)
+    app.router.add_get("/api/catalog/qr/{product_id}", _api_qr)
     app.router.add_get("/api/products/{uid}", handle_api_products)
 
     # ── GET /api/needs/{batch_id} ──────────────────────────────────
@@ -3916,9 +4716,9 @@ async def start_webserver():
     async def _compare_page(req):
         path = os.path.join(BASE_DIR, "webapp", "compare.html")
         if os.path.exists(path):
-            return _web.FileResponse(path)
-        return _web.Response(text="compare.html topilmadi", status=404,
-                             content_type="text/html")
+            with open(path, "r", encoding="utf-8") as f:
+                return _web.Response(text=f.read(), content_type="text/html", charset="utf-8")
+        return _web.Response(text="compare.html topilmadi", status=404, content_type="text/html")
     app.router.add_get("/compare/{batch_id}", _compare_page)
 
     # ── GET /api/offers/{batch_id} ─────────────────────────────────
@@ -4080,8 +4880,11 @@ async def start_webserver():
     # ── KATALOG API ────────────────────────────────────────────────
     async def _catalog_page(req):
         path = os.path.join(BASE_DIR, "webapp", "catalog.html")
-        if os.path.exists(path): return _web.FileResponse(path)
-        return _web.Response(text="catalog.html topilmadi", status=404)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                html = f.read()
+            return _web.Response(text=html, content_type="text/html", charset="utf-8")
+        return _web.Response(text="catalog.html topilmadi", status=404, content_type="text/html")
     app.router.add_get("/catalog", _catalog_page)
 
     async def _api_catalog(req):
@@ -4103,7 +4906,8 @@ async def start_webserver():
         if q:
             rows = [r for r in rows if q in (r["name"] or "").lower()]
         cats = {1:"🦷 Terapevtik",2:"⚙️ Jarrohlik",3:"🔬 Zubtexnik",
-                4:"🧪 Dezinfeksiya",5:"💡 Uskunalar"}
+                4:"🧪 Dezinfeksiya",5:"💡 Uskunalar",6:"📸 Rentgen",
+                7:"🖥 CAD/CAM",8:"🦴 Implantlar",9:"💻 Stom Soft",10:"🎓 Kurslar"}
         # Har mahsulot uchun rasmlar va variantlar
         data = []
         for r in rows:
@@ -4120,6 +4924,7 @@ async def start_webserver():
                 "region": r["region"], "stock": r["stock"] or 0,
                 "category": cats.get(r["category_id"] or 1,""),
                 "description": r["description"] or "",
+                "article_code": r["article_code"] or "",
                 "photos": [f"/api/photo/{p['file_id']}" for p in photos_rows],
                 "variants": [{"size_name":v["size_name"],"article":v["article"],"stock":v["stock"]} for v in vars_rows]
             })
@@ -4138,7 +4943,8 @@ async def start_webserver():
                 content_type="application/json",
                 headers={"Access-Control-Allow-Origin": "*"})
         cats = {1:"🦷 Terapevtik",2:"⚙️ Jarrohlik",3:"🔬 Zubtexnik",
-                4:"🧪 Dezinfeksiya",5:"💡 Uskunalar"}
+                4:"🧪 Dezinfeksiya",5:"💡 Uskunalar",6:"📸 Rentgen",
+                7:"🖥 CAD/CAM",8:"🦴 Implantlar",9:"💻 Stom Soft",10:"🎓 Kurslar"}
         rows = await db_all(
             "SELECT * FROM products WHERE shop_id=? ORDER BY created_at DESC", (shop["id"],))
         data = []
@@ -4206,16 +5012,22 @@ async def start_webserver():
                     content_type="application/json")
 
             # Asosiy mahsulot yozish
+            # Avtomatik artikul kod
+            art_code = await _generate_article_code()
+            # Ko'p kategoriya bo'lsa birinchisini asosiy qilamiz
+            categories = body.get("categories", [cat_id])
+            if not categories: categories = [cat_id]
+            main_cat = int(categories[0])
             pid = await db_insert(
-                "INSERT INTO products(shop_id,name,price,unit,description,category_id) "
-                "VALUES(?,?,?,?,?,?)",
-                (shop["id"], name, price, unit, desc, cat_id)
+                "INSERT INTO products(shop_id,name,price,unit,description,category_id,article_code,stock) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (shop["id"], name, price, unit, desc, main_cat, art_code, int(body.get("stock",0)))
             )
 
             # Rasmlar — har biri Telegram ga yuboriladi
             import base64 as _b64
             first_photo_id = None
-            for i, img_b64 in enumerate(images[:3]):
+            for i, img_b64 in enumerate(images[:5]):
                 if not img_b64: continue
                 try:
                     img_bytes = _b64.b64decode(img_b64)
@@ -4367,6 +5179,27 @@ async def start_webserver():
                     sent += 1
                 except Exception as e:
                     log.error(f"Cart order notify xato: {e}")
+                # Guruhga ham yuborish
+                shop_info = await db_get(
+                    "SELECT * FROM shops WHERE owner_id=? AND status='active'", (seller_id,))
+                if shop_info and shop_info.get("group_chat_id"):
+                    import json as _pj2
+                    try:
+                        _items = _pj.loads(_json.dumps(items, ensure_ascii=False))
+                        _prod_txt = "\n".join([
+                            f"  • {it.get('name','')} — {it.get('qty',0)} {it.get('unit','dona')}"
+                            for it in _items[:5]
+                        ])
+                    except Exception:
+                        _prod_txt = "mahsulotlar"
+                    asyncio.create_task(_post_order_to_group(
+                        order_id=order_id,
+                        shop=dict(shop_info),
+                        products_txt=_prod_txt,
+                        total=total,
+                        buyer_name=uname,
+                        buyer_region=uregion
+                    ))
             return _web.Response(
                 text=_json.dumps({"ok":True,"sent":sent}),
                 content_type="application/json")
@@ -4376,6 +5209,107 @@ async def start_webserver():
                 text=_json.dumps({"ok":False,"error":str(e)}),
                 content_type="application/json")
     app.router.add_post("/api/catalog/cart_order", _api_cart_order)
+
+    async def _api_quick_order_direct(req):
+        """Katalog Mini App dan tezkor buyurtma — variantlar bilan."""
+        try:
+            body  = await req.json()
+            pid   = int(body.get("product_id", 0))
+            uid   = int(body.get("user_id", 0))
+            # items: [{size_name, qty}] yoki eski format qty
+            items_raw = body.get("items", [])
+            if not items_raw:
+                # Eski format
+                qty = float(body.get("qty", 1))
+                items_raw = [{"size_name": None, "qty": qty}]
+
+            prod = await db_get(
+                "SELECT p.*, s.owner_id as seller_id, s.shop_name "
+                "FROM products p JOIN shops s ON p.shop_id=s.id WHERE p.id=?", (pid,))
+            if not prod:
+                return _web.Response(
+                    text=_json.dumps({"ok":False,"error":"mahsulot topilmadi"}),
+                    content_type="application/json")
+
+            u       = await get_user(uid)
+            uname   = (u["clinic_name"] or u["full_name"] or str(uid)) if u else str(uid)
+            uphone  = u["phone"] if u else "—"
+            uregion = u["region"] if u else "—"
+            uaddr   = u["address"] if u else "—"
+
+            # Buyurtma satrlari
+            import json as _pj
+            order_lines = []
+            total = 0
+            lines_txt = ""
+            for it in items_raw:
+                qty  = float(it.get("qty", 1))
+                size = it.get("size_name") or ""
+                sub  = prod["price"] * qty
+                total += sub
+                order_lines.append({
+                    "name": prod["name"],
+                    "size": size,
+                    "qty":  qty,
+                    "price": prod["price"],
+                    "unit":  prod["unit"],
+                    "subtotal": sub
+                })
+                if size:
+                    lines_txt += f"  • *{size}* razmer — {qty:.0f} {prod['unit']} · {sub:,.0f} so\'m\n"
+                else:
+                    lines_txt += f"  • {qty:.0f} {prod['unit']} · {sub:,.0f} so\'m\n"
+
+            order_id = await db_insert(
+                "INSERT INTO catalog_orders(buyer_id,seller_id,products_json,total_amount) VALUES(?,?,?,?)",
+                (uid, prod["seller_id"], _pj.dumps(order_lines, ensure_ascii=False), total)
+            )
+
+            msg_txt = (
+                f"⚡ *Tezkor buyurtma #{order_id}!*\n\n"
+                f"📦 *{prod['name']}:*\n{lines_txt}\n"
+                f"💰 *Jami: {total:,.0f} so\'m*\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🏥 *{uname}*\n"
+                f"📞 {uphone}\n"
+                f"📍 {uregion}\n"
+                f"🏠 {uaddr}"
+            )
+            confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="✅ Qabul qildim",
+                    callback_data=f"co_confirm_{order_id}_{uid}"),
+                InlineKeyboardButton(
+                    text="❌ Mavjud emas",
+                    callback_data=f"co_reject_{order_id}_{uid}")
+            ]])
+            try:
+                await bot.send_message(prod["seller_id"], msg_txt, reply_markup=confirm_kb)
+            except Exception as e:
+                log.error(f"Quick order direct notify xato: {e}")
+            # Guruhga ham
+            shop_info2 = await db_get(
+                "SELECT * FROM shops WHERE owner_id=? AND status='active'",
+                (prod["seller_id"],))
+            if shop_info2 and shop_info2.get("group_chat_id"):
+                asyncio.create_task(_post_order_to_group(
+                    order_id=order_id,
+                    shop=dict(shop_info2),
+                    products_txt=lines_txt.replace("*","").replace("\\",""),
+                    total=total,
+                    buyer_name=uname,
+                    buyer_region=uregion
+                ))
+
+            return _web.Response(
+                text=_json.dumps({"ok":True,"order_id":order_id}),
+                content_type="application/json")
+        except Exception as e:
+            log.error(f"quick_order_direct xato: {e}")
+            return _web.Response(
+                text=_json.dumps({"ok":False,"error":str(e)}),
+                content_type="application/json")
+    app.router.add_post("/api/catalog/quick_order_direct", _api_quick_order_direct)
 
     async def _admin_support_list(req):
         uid = int(req.query.get("uid", 0))
