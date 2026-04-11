@@ -5056,8 +5056,38 @@ async def start_webserver():
                     (pid, size, v.get("article",""), int(v.get("stock",0)))
                 )
 
+            # Kanalga post yuborish
+            try:
+                prod_info = await db_get("SELECT * FROM products WHERE id=?", (pid,))
+                shop_info = await db_get("SELECT * FROM shops WHERE id=?", (shop["id"],))
+                ph_row = await db_get(
+                    "SELECT file_id FROM product_photos WHERE product_id=? ORDER BY sort_order LIMIT 1",
+                    (pid,))
+                link_url = f"https://t.me/XazdentBot?start=xz_{art_code}"
+                caption = (
+                    f"🆕 *Yangi mahsulot!*\n\n"
+                    f"🦷 *{name}*\n"
+                    f"📌 {art_code}\n"
+                    f"💰 *{price:,.0f} so\'m/{unit}*\n"
+                    f"🏪 {shop_info['shop_name'] if shop_info else '?'} · "
+                    f"📍 {shop_info['region'] if shop_info else ''}\n\n"
+                    f"👆 Ko\'rish va buyurtma berish:"
+                )
+                channel = CHANNEL_ID if CHANNEL_ID else "@testxzd"
+                channel_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🛍 Ko'rish va buyurtma →",
+                                         url=f"https://t.me/XazdentBot?start=xz_{art_code}")
+                ]])
+                if ph_row and ph_row.get("file_id"):
+                    await bot.send_photo(channel, ph_row["file_id"],
+                                         caption=caption, reply_markup=channel_kb)
+                else:
+                    await bot.send_message(channel, caption, reply_markup=channel_kb)
+            except Exception as ch_err:
+                log.error(f"Kanal post xato: {ch_err}")
+
             return _web.Response(
-                text=_json.dumps({"ok":True,"product_id":pid}),
+                text=_json.dumps({"ok":True,"product_id":pid,"article_code":art_code}),
                 content_type="application/json")
         except Exception as e:
             log.error(f"add_product xato: {e}")
