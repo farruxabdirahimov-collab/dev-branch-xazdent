@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 BOT_TOKEN  = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@xazdent")
 ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 
 # E'lon narxlari (ball)
