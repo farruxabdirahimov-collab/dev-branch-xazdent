@@ -4170,6 +4170,116 @@ async def claim_order(call: CallbackQuery):
 
     await call.answer(f"✅ Qabul qildingiz! Xaridor kontakti yuborildi.")
 
+@router.callback_query(F.data.startswith("co_partial_"))
+async def catalog_order_partial(call: CallbackQuery, state: FSMContext):
+    """Sotuvchi qisman qabul qildi."""
+    parts    = call.data.split("_")
+    order_id = int(parts[2])
+    buyer_id = int(parts[3])
+    seller   = call.from_user.id
+
+    order = await db_get("SELECT * FROM catalog_orders WHERE id=?", (order_id,))
+    if not order:
+        await call.answer("Topilmadi", show_alert=True)
+        return
+
+    import json as _pj
+    try:
+        lines = _pj.loads(order["products_json"] or "[]")
+    except Exception:
+        lines = []
+
+    await state.set_state(ComplaintState.waiting_reason)
+    await state.update_data(
+        partial_order_id=order_id,
+        partial_buyer_id=buyer_id,
+        partial_seller_id=seller
+    )
+
+    items_list = "\n".join([
+        "  • " + str(it.get("size","?")) + " — " +
+        str(int(it.get("qty",1))) + " " + str(it.get("unit","dona"))
+        for it in lines
+    ])
+    await call.message.answer(
+        f"⚠️ *Qisman qabul #{order_id}*\n\n"
+        f"Buyurtma:\n{items_list}\n\n"
+        f"Qaysi razmerlar yoki nechta yo\'qligini yozing:\n"
+        f"_Masalan: 5510 razmer yo\'q, 4008 dan faqat 1 ta bor_\n\n"
+        f"/cancel — bekor qilish"
+    )
+    await call.answer()
+
+@router.message(ComplaintState.waiting_reason, F.text)
+async def partial_or_complaint_text(msg: Message, state: FSMContext):
+    """Qisman qabul yoki shikoyat matni."""
+    if msg.text and msg.text.startswith("/"):
+        await state.clear()
+        await msg.answer("Bekor qilindi.")
+        return
+
+    d = await state.get_data()
+
+    # Qisman qabul
+    if d.get("partial_order_id"):
+        order_id  = d["partial_order_id"]
+        buyer_id  = d["partial_buyer_id"]
+        seller_id = d["partial_seller_id"]
+        reason    = msg.text.strip()
+        await state.clear()
+
+        await db_run(
+            "UPDATE catalog_orders SET status='partial' WHERE id=?", (order_id,))
+
+        u = await get_user(seller_id)
+        shop = await db_get("SELECT shop_name FROM shops WHERE owner_id=?", (seller_id,))
+        sname = (shop["shop_name"] if shop else None) or                 (u["clinic_name"] if u else None) or "Sotuvchi"
+
+        # Xaridorga
+        try:
+            await bot.send_message(
+                buyer_id,
+                f"⚠️ *Buyurtma #{order_id} — Qisman qabul*\n\n"
+                f"🏪 *{sname}* dan xabar:\n"
+                f"_{reason}_\n\n"
+                f"Sotuvchi siz bilan bog\'lanib aniqlashtiradi."
+            )
+        except Exception: pass
+
+        await msg.answer(
+            f"✅ Xaridorga qisman qabul haqida xabar yuborildi.\n"
+            f"Buyurtma #{order_id} aktiv holatda qoldi.")
+        return
+
+    # Shikoyat
+    order_id  = d.get("order_id")
+    seller_id = d.get("seller_id")
+    reason    = msg.text.strip()
+    buyer_id  = msg.from_user.id
+    u         = await get_user(buyer_id)
+    uname     = (u["clinic_name"] or u["full_name"] or str(buyer_id)) if u else str(buyer_id)
+
+    await db_insert(
+        "INSERT INTO complaints(from_user_id,against_user_id,reason) VALUES(?,?,?)",
+        (buyer_id, seller_id, reason))
+    await db_run(
+        "UPDATE catalog_orders SET status='disputed' WHERE id=?", (order_id,))
+    await state.clear()
+    await msg.answer(
+        "✅ *Shikoyatingiz qabul qilindi.*\n\n"
+        "Admin 24 soat ichida ko\'rib chiqadi.")
+
+    for aid in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                aid,
+                f"🚨 *Yangi shikoyat!*\n\n"
+                f"👤 {uname} (ID: {buyer_id})\n"
+                f"🏪 Sotuvchi ID: {seller_id}\n"
+                f"📋 Buyurtma #{order_id}\n\n"
+                f"📝 {reason}")
+        except Exception: pass
+
 # ── FALLBACK ─────────────────────────────────────────────────────────────────
 @router.message()
 async def fallback(msg: Message, state: FSMContext):
@@ -5308,99 +5418,176 @@ async def start_webserver():
     app.router.add_post("/api/catalog/cart_order", _api_cart_order)
 
     async def _api_quick_order_direct(req):
-        """Katalog Mini App dan tezkor buyurtma — variantlar bilan."""
+        """Tezkor buyurtma — ko'p variant va ko'p miqdor."""
         try:
-            body  = await req.json()
-            pid   = int(body.get("product_id", 0))
-            uid   = int(body.get("user_id", 0))
-            # items: [{size_name, qty}] yoki eski format qty
+            body = await req.json()
+            pid  = int(body.get("product_id", 0))
+            uid  = int(body.get("user_id", 0))
+
+            if not pid or not uid:
+                return _web.Response(
+                    text=_json.dumps({"ok":False,"error":"product_id va user_id kerak"}),
+                    content_type="application/json")
+
+            # items: [{size_name, qty}] — har bir variant
             items_raw = body.get("items", [])
             if not items_raw:
-                # Eski format
-                qty = float(body.get("qty", 1))
+                qty = float(body.get("qty", 1) or 1)
                 items_raw = [{"size_name": None, "qty": qty}]
 
+            # Faqat qty > 0 bo'lganlarni olish
+            items_raw = [
+                it for it in items_raw
+                if float(it.get("qty", 0) or 0) > 0
+            ]
+            if not items_raw:
+                return _web.Response(
+                    text=_json.dumps({"ok":False,"error":"Kamida bitta variant miqdori kiriting"}),
+                    content_type="application/json")
+
             prod = await db_get(
-                "SELECT p.*, s.owner_id as seller_id, s.shop_name "
+                "SELECT p.*, s.owner_id as seller_id, s.shop_name, s.id as shop_id "
                 "FROM products p JOIN shops s ON p.shop_id=s.id WHERE p.id=?", (pid,))
             if not prod:
                 return _web.Response(
-                    text=_json.dumps({"ok":False,"error":"mahsulot topilmadi"}),
+                    text=_json.dumps({"ok":False,"error":"Mahsulot topilmadi"}),
                     content_type="application/json")
 
             u       = await get_user(uid)
-            uname   = (u["clinic_name"] or u["full_name"] or str(uid)) if u else str(uid)
-            uphone  = u["phone"] if u else "—"
-            uregion = u["region"] if u else "—"
-            uaddr   = u["address"] if u else "—"
+            uname   = ""
+            if u:
+                uname = u.get("clinic_name") or u.get("full_name") or str(uid)
+            uname   = uname or str(uid)
+            uphone  = (u.get("phone") or "—") if u else "—"
+            uregion = (u.get("region") or "—") if u else "—"
+            uaddr   = (u.get("address") or "—") if u else "—"
+
+            import json as _pj
+
+            # Stok tekshiruvi
+            stock_warnings = []
+            for it in items_raw:
+                size = (it.get("size_name") or "").strip()
+                qty  = float(it.get("qty", 1) or 1)
+                if size:
+                    vrow = await db_get(
+                        "SELECT stock FROM product_variants "
+                        "WHERE product_id=? AND size_name=?", (pid, size))
+                    if vrow and vrow["stock"] and 0 < vrow["stock"] < qty:
+                        stock_warnings.append(
+                            f"{size}: {int(qty)} ta so'raldi, {vrow['stock']} ta bor")
 
             # Buyurtma satrlari
-            import json as _pj
             order_lines = []
-            total = 0
-            lines_txt = ""
+            total       = 0
+            lines_txt   = ""
             for it in items_raw:
-                qty  = float(it.get("qty", 1))
-                size = it.get("size_name") or ""
+                size = (it.get("size_name") or "").strip()
+                qty  = float(it.get("qty", 1) or 1)
+                if qty <= 0: continue
                 sub  = prod["price"] * qty
                 total += sub
                 order_lines.append({
-                    "name": prod["name"],
-                    "size": size,
-                    "qty":  qty,
-                    "price": prod["price"],
-                    "unit":  prod["unit"],
+                    "name":     prod["name"],
+                    "size":     size,
+                    "qty":      qty,
+                    "price":    prod["price"],
+                    "unit":     prod["unit"],
                     "subtotal": sub
                 })
-                if size:
-                    lines_txt += f"  • *{size}* razmer — {qty:.0f} {prod['unit']} · {sub:,.0f} so\'m\n"
-                else:
-                    lines_txt += f"  • {qty:.0f} {prod['unit']} · {sub:,.0f} so\'m\n"
+                line = f"  • *{size}* — {qty:.0f} {prod['unit']}" if size else                        f"  • {qty:.0f} {prod['unit']}"
+                lines_txt += line + f" = {sub:,.0f} so\'m\n"
 
+            if not order_lines:
+                return _web.Response(
+                    text=_json.dumps({"ok":False,"error":"Buyurtma bo'sh"}),
+                    content_type="application/json")
+
+            # DB ga yozish
             order_id = await db_insert(
-                "INSERT INTO catalog_orders(buyer_id,seller_id,products_json,total_amount) VALUES(?,?,?,?)",
-                (uid, prod["seller_id"], _pj.dumps(order_lines, ensure_ascii=False), total)
+                "INSERT INTO catalog_orders(buyer_id,seller_id,products_json,total_amount) "
+                "VALUES(?,?,?,?)",
+                (uid, prod["seller_id"],
+                 _pj.dumps(order_lines, ensure_ascii=False), total)
             )
 
+            # Stok ogohlantirish qo'shimcha
+            warn_txt = ""
+            if stock_warnings:
+                warn_txt = "\n\n⚠️ *Diqqat:*\n" + "\n".join(
+                    [f"  ⚡ {w}" for w in stock_warnings])
+
+            # Sotuvchiga xabar
+            total_dona = sum(float(it.get("qty",1) or 1) for it in items_raw)
             msg_txt = (
                 f"⚡ *Tezkor buyurtma #{order_id}!*\n\n"
-                f"📦 *{prod['name']}:*\n{lines_txt}\n"
-                f"💰 *Jami: {total:,.0f} so\'m*\n\n"
+                f"📦 *{prod['name']}* "
+                f"({len(order_lines)} xil razmer, {total_dona:.0f} dona):\n"
+                f"{lines_txt}\n"
+                f"💰 *Jami: {total:,.0f} so\'m*"
+                f"{warn_txt}\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🏥 *{uname}*\n"
                 f"📞 {uphone}\n"
                 f"📍 {uregion}\n"
                 f"🏠 {uaddr}"
             )
-            confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="✅ Qabul qildim",
-                    callback_data=f"co_confirm_{order_id}_{uid}"),
-                InlineKeyboardButton(
-                    text="❌ Mavjud emas",
-                    callback_data=f"co_reject_{order_id}_{uid}")
-            ]])
+
+            # Qisman qabul imkoniyati bilan
+            confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Qabul qildim",
+                        callback_data=f"co_confirm_{order_id}_{uid}"),
+                    InlineKeyboardButton(
+                        text="⚠️ Qisman",
+                        callback_data=f"co_partial_{order_id}_{uid}"),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Mavjud emas",
+                        callback_data=f"co_reject_{order_id}_{uid}"),
+                ]
+            ])
+
             try:
-                await bot.send_message(prod["seller_id"], msg_txt, reply_markup=confirm_kb)
+                await bot.send_message(
+                    prod["seller_id"], msg_txt, reply_markup=confirm_kb)
             except Exception as e:
-                log.error(f"Quick order direct notify xato: {e}")
+                log.error(f"Quick order notify xato: {e}")
+
             # Guruhga ham
             shop_info2 = await db_get(
                 "SELECT * FROM shops WHERE owner_id=? AND status='active'",
                 (prod["seller_id"],))
             if shop_info2 and shop_info2.get("group_chat_id"):
+                clean_txt = lines_txt.replace("*","").replace("\'","'")
                 asyncio.create_task(_post_order_to_group(
                     order_id=order_id,
                     shop=dict(shop_info2),
-                    products_txt=lines_txt.replace("*","").replace("\\",""),
+                    products_txt=clean_txt,
                     total=total,
                     buyer_name=uname,
                     buyer_region=uregion
                 ))
 
+            # Xaridorga tasdiqlash
+            try:
+                await bot.send_message(
+                    uid,
+                    f"✅ *Buyurtma #{order_id} yuborildi!*\n\n"
+                    f"📦 *{prod['name']}* — {total_dona:.0f} dona\n"
+                    f"💰 {total:,.0f} so\'m\n\n"
+                    f"_Sotuvchi tez orada bog\'lanadi._"
+                )
+            except Exception: pass
+
             return _web.Response(
-                text=_json.dumps({"ok":True,"order_id":order_id}),
-                content_type="application/json")
+                text=_json.dumps({"ok":True,"order_id":order_id,
+                                  "warnings": stock_warnings}),
+                content_type="application/json",
+                headers={"Access-Control-Allow-Origin":"*"})
+
         except Exception as e:
             log.error(f"quick_order_direct xato: {e}")
             return _web.Response(
