@@ -5164,13 +5164,9 @@ async def start_webserver():
             first_photo_id = None
             all_photo_ids = []
 
-            # Storage: kanal yoki admin
-            if CHANNEL_ID:
-                storage_target = CHANNEL_ID
-            elif ADMIN_IDS:
-                storage_target = ADMIN_IDS[0]
-            else:
-                storage_target = uid
+            # Rasmni sotuvchining o'ziga yuboramiz — file_id olish uchun
+            # (Kanal uchun file_id keyinroq ishlatiladi)
+            storage_target = uid
 
             for i, img_b64 in enumerate(images[:5]):
                 if not img_b64: continue
@@ -5224,10 +5220,18 @@ async def start_webserver():
                 shop_name = shop_info["shop_name"] if shop_info else "?"
                 region    = shop_info["region"] if shop_info else ""
                 channel   = CHANNEL_ID if CHANNEL_ID else "@testxzd"
+
+                # Bot username ni aniqlash
+                try:
+                    bot_info = await bot.get_me()
+                    bot_username = bot_info.username
+                except Exception:
+                    bot_username = "XazdentBot"
+
                 channel_kb = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
                         text="🛍 Ko\'rish va buyurtma →",
-                        url=f"https://t.me/XazdentBot?start=xz_{art_code}"
+                        url=f"https://t.me/{bot_username}?start=xz_{art_code}"
                     )
                 ]])
                 caption = (
@@ -5240,23 +5244,58 @@ async def start_webserver():
                 )
 
                 if len(all_photo_ids) > 1:
-                    # Ko'p rasm — media group
+                    # Ko'p rasm — media group (bytes dan to'g'ridan yuborish)
                     from aiogram.types import InputMediaPhoto
+                    # Avval rasmlarni bytes sifatida qayta yuklaymiz kanalga
                     media = []
-                    for idx, fid in enumerate(all_photo_ids[:10]):
-                        if idx == 0:
-                            media.append(InputMediaPhoto(
-                                media=fid, caption=caption, parse_mode="Markdown"))
-                        else:
-                            media.append(InputMediaPhoto(media=fid))
-                    await bot.send_media_group(channel, media=media)
-                    # Havolani alohida yuboramiz
-                    await bot.send_message(channel, "👆 Buyurtma berish uchun:",
-                                          reply_markup=channel_kb)
+                    import base64 as _b64ch
+                    for idx, img_b64 in enumerate(images[:len(all_photo_ids)]):
+                        try:
+                            raw = img_b64
+                            if "base64," in raw:
+                                raw = raw.split("base64,")[1]
+                            elif "," in raw and len(raw.split(",")[0]) < 50:
+                                raw = raw.split(",")[1]
+                            raw = raw.strip()
+                            missing = len(raw) % 4
+                            if missing:
+                                raw += "=" * (4 - missing)
+                            img_bytes = _b64ch.b64decode(raw)
+                            buf = BufferedInputFile(img_bytes, filename=f"ch_{idx}.jpg")
+                            if idx == 0:
+                                media.append(InputMediaPhoto(
+                                    media=buf, caption=caption, parse_mode="Markdown"))
+                            else:
+                                media.append(InputMediaPhoto(media=buf))
+                        except Exception as me:
+                            log.error(f"Media group rasm {idx} xato: {me}")
+                    if media:
+                        await bot.send_media_group(channel, media=media)
+                        await bot.send_message(channel, "👆 Buyurtma berish uchun:",
+                                              reply_markup=channel_kb)
+                    else:
+                        await bot.send_message(channel, caption, reply_markup=channel_kb)
+
                 elif all_photo_ids:
-                    # Bitta rasm
-                    await bot.send_photo(channel, all_photo_ids[0],
-                                        caption=caption, reply_markup=channel_kb)
+                    # Bitta rasm — bytes dan yuborish
+                    try:
+                        import base64 as _b64ch2
+                        raw = images[0]
+                        if "base64," in raw:
+                            raw = raw.split("base64,")[1]
+                        elif "," in raw and len(raw.split(",")[0]) < 50:
+                            raw = raw.split(",")[1]
+                        raw = raw.strip()
+                        missing = len(raw) % 4
+                        if missing:
+                            raw += "=" * (4 - missing)
+                        img_bytes = _b64ch2.b64decode(raw)
+                        buf = BufferedInputFile(img_bytes, filename="ch_0.jpg")
+                        await bot.send_photo(channel, buf,
+                                            caption=caption, reply_markup=channel_kb)
+                    except Exception as se:
+                        log.error(f"Single rasm kanal xato: {se}")
+                        await bot.send_message(channel, caption, reply_markup=channel_kb)
                 else:
                     # Rasmsiz
                     await bot.send_message(channel, caption, reply_markup=channel_kb)
@@ -5321,37 +5360,65 @@ async def start_webserver():
     async def _api_cart_order(req):
         """Savatdagi mahsulotlarni sotuvchilarga yuborish."""
         try:
-            body   = await req.json()
-            uid    = int(body.get("user_id", 0))
-            orders = body.get("orders", [])  # [{seller_id, shop_name, items:[...]}]
-            if not orders or not uid:
+            body = await req.json()
+            uid  = int(body.get("user_id", 0))
+
+            # JS dan: {items:[{product_id, seller_id, qty, price, name, unit, variant}], user_id}
+            flat_items = body.get("items", [])
+
+            if not flat_items or not uid:
                 return _web.Response(
-                    text=_json.dumps({"ok":False,"error":"ma'lumot yetarli emas"}),
+                    text=_json.dumps({"ok":False,
+                        "error":f"Savat bo'sh yoki uid yo'q (uid={uid}, items={len(flat_items)})"}),
                     content_type="application/json")
+
             u = await get_user(uid)
             if not u:
                 return _web.Response(
                     text=_json.dumps({"ok":False,"error":"foydalanuvchi topilmadi"}),
                     content_type="application/json")
-            uname  = u["clinic_name"] or u["full_name"] or str(uid)
-            uphone = u["phone"] or "—"
-            uregion= u["region"] or "—"
-            uaddr  = u["address"] or "—"
-            sent   = 0
-            for order in orders:
-                seller_id = int(order.get("seller_id", 0))
-                shop_name = order.get("shop_name","")
-                items     = order.get("items",[])
-                if not seller_id or not items: continue
+
+            uname   = u.get("clinic_name") or u.get("full_name") or str(uid)
+            uphone  = u.get("phone") or "—"
+            uregion = u.get("region") or "—"
+            uaddr   = u.get("address") or "—"
+
+            # Sotuvchi bo'yicha guruhlash
+            seller_map = {}
+            for it in flat_items:
+                sid = int(it.get("seller_id") or 0)
+                if not sid:
+                    # seller_id yo'q bo'lsa product_id dan olamiz
+                    prod_row = await db_get(
+                        "SELECT s.owner_id as seller_id, s.shop_name "
+                        "FROM products p JOIN shops s ON p.shop_id=s.id WHERE p.id=?",
+                        (int(it.get("product_id",0)),))
+                    if prod_row:
+                        sid = prod_row["seller_id"]
+                        it["shop_name"] = prod_row["shop_name"]
+                if sid not in seller_map:
+                    seller_map[sid] = []
+                seller_map[sid].append(it)
+
+            sent = 0
+            import json as _pj
+            for seller_id, items in seller_map.items():
+                if not seller_id: continue
                 # Xabar matni
-                lines  = []
-                total  = 0
+                lines = []
+                total = 0
                 for i, item in enumerate(items, 1):
-                    subtotal = item["price"] * item["qty"]
+                    qty      = float(item.get("qty", 1) or 1)
+                    price    = float(item.get("price", 0) or 0)
+                    subtotal = price * qty
                     total   += subtotal
+                    variant  = item.get("variant") or ""
+                    name     = item.get("name","?")
+                    unit     = item.get("unit","dona")
+                    vstr     = f" ({variant})" if variant else ""
                     lines.append(
-                        f"{i}. *{item['name']}*\n"
-                        f"   {item['qty']} {item['unit']} × {item['price']:,.0f} = *{subtotal:,.0f} so\'m*"
+                        f"{i}. *{name}{vstr}*\n"
+                        f"   {qty:.0f} {unit} × {price:,.0f} = *{subtotal:,.0f} so\'m*"
                     )
                 items_txt = "\n".join(lines)
                 # catalog_orders jadvaliga yozamiz
