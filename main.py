@@ -3682,44 +3682,69 @@ async def _generate_article_code() -> str:
 
 def _generate_qr_bytes(url: str, label: str = "") -> bytes:
     """QR kod PNG — ichida artikul kodi yozilgan."""
-    import qrcode
-    import io
-    from PIL import Image, ImageDraw, ImageFont
+    try:
+        import qrcode
+        import io
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
 
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(url)
-    qr.make(fit=True)
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-
-    if label:
-        # QR ostiga matn qo'shamiz
-        qr_w, qr_h = qr_img.size
-        txt_h = 48  # Matn uchun joy
-        final = Image.new("RGB", (qr_w, qr_h + txt_h), "white")
-        final.paste(qr_img, (0, 0))
-        draw = ImageDraw.Draw(final)
-        # Font — standart
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        except Exception:
-            font = ImageFont.load_default()
-        # Matnni markazga joylash
-        bbox = draw.textbbox((0, 0), label, font=font)
-        txt_w = bbox[2] - bbox[0]
-        x = (qr_w - txt_w) // 2
-        y = qr_h + 8
-        draw.text((x, y), label, fill="black", font=font)
-    else:
-        final = qr_img
+            from PIL import Image, ImageDraw, ImageFont
+            qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+            if label:
+                qr_w, qr_h = qr_img.size
+                txt_h = 52
+                final = Image.new("RGB", (qr_w, qr_h + txt_h), "white")
+                final.paste(qr_img, (0, 0))
+                draw = ImageDraw.Draw(final)
+                # Font qidirish
+                font = None
+                font_paths = [
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                ]
+                for fp in font_paths:
+                    try:
+                        font = ImageFont.truetype(fp, 26)
+                        break
+                    except Exception:
+                        continue
+                if font is None:
+                    font = ImageFont.load_default()
+                try:
+                    bbox = draw.textbbox((0, 0), label, font=font)
+                    txt_w = bbox[2] - bbox[0]
+                except Exception:
+                    txt_w = len(label) * 14
+                x = max(0, (qr_w - txt_w) // 2)
+                y = qr_h + 10
+                draw.text((x, y), label, fill="#090979", font=font)
+                # XAZDENT yozuvi
+                try:
+                    bbox2 = draw.textbbox((0, 0), "XAZDENT", font=font)
+                    tw2 = bbox2[2] - bbox2[0]
+                except Exception:
+                    tw2 = 80
+                draw.text(((qr_w - tw2)//2, qr_h - 2), "XAZDENT", fill="#444DCF", font=font)
+            else:
+                final = qr_img
+        except Exception as pil_e:
+            log.warning(f"PIL xato, oddiy QR: {pil_e}")
+            qr_img = qr.make_image(fill_color="black", back_color="white")
+            final = qr_img
 
-    buf = io.BytesIO()
-    final.save(buf, format="PNG")
-    return buf.getvalue()
+        buf = io.BytesIO()
+        final.save(buf, format="PNG")
+        return buf.getvalue()
+    except ImportError as e:
+        raise Exception(f"qrcode kutubxonasi o'rnatilmagan: {e}")
 
 async def _send_product_qr(user_id: int, product_id: int):
     """Foydalanuvchiga mahsulot QR kodini yuboradi."""
@@ -5029,21 +5054,36 @@ async def start_webserver():
             first_photo_id = None
             all_photo_ids = []
 
-            # Birinchi navbat — botning o'z kanaliga yuboring (faqat saqlash uchun)
-            # Agar kanal bo'lmasa — adminga
-            storage_target = CHANNEL_ID if CHANNEL_ID else (ADMIN_IDS[0] if ADMIN_IDS else uid)
+            # Storage: kanal yoki admin
+            if CHANNEL_ID:
+                storage_target = CHANNEL_ID
+            elif ADMIN_IDS:
+                storage_target = ADMIN_IDS[0]
+            else:
+                storage_target = uid
 
             for i, img_b64 in enumerate(images[:5]):
                 if not img_b64: continue
                 try:
-                    # base64 header ni olib tashlash
-                    if "," in img_b64:
-                        img_b64 = img_b64.split(",")[1]
-                    img_bytes = _b64.b64decode(img_b64)
+                    # base64 prefiksini olib tashlash
+                    raw = img_b64
+                    if "base64," in raw:
+                        raw = raw.split("base64,")[1]
+                    elif "," in raw and len(raw.split(",")[0]) < 50:
+                        raw = raw.split(",")[1]
+                    # Padding tuzatish
+                    raw = raw.strip()
+                    missing = len(raw) % 4
+                    if missing:
+                        raw += "=" * (4 - missing)
+                    img_bytes = _b64.b64decode(raw)
+                    if len(img_bytes) < 100:
+                        log.warning(f"Rasm juda kichik ({i}), o'tkazildi")
+                        continue
                     buf = BufferedInputFile(img_bytes, filename=f"prod_{pid}_{i}.jpg")
                     sent = await bot.send_photo(
                         storage_target, buf,
-                        caption=f"#product_{pid} #{art_code} rasm {i+1}"
+                        caption=f"📦 #{art_code} — rasm {i+1}"
                     )
                     fid = sent.photo[-1].file_id
                     all_photo_ids.append(fid)
@@ -5055,8 +5095,9 @@ async def start_webserver():
                         "INSERT INTO product_photos(product_id,file_id,sort_order) VALUES(?,?,?)",
                         (pid, fid, i)
                     )
+                    log.info(f"✅ Rasm {i+1} saqlandi: {fid[:20]}...")
                 except Exception as e:
-                    log.error(f"Photo upload xato ({i}): {e}")
+                    log.error(f"❌ Photo upload xato ({i}): {e}")
 
             # Variantlar
             for v in variants:
