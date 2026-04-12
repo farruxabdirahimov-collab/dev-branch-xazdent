@@ -994,8 +994,23 @@ function saveProduct() {
       closeForm();
       showSuccessCard(d.product_id, d.article_code, name, price, unit);
       loadMy();
-    } else { alert('Xato: '+(d.error||'')); }
-  }).catch(function(e){ btn.disabled=false; btn.textContent='💾 Saqlash'; alert('Xato: '+e.message); });
+    } else {
+      var err = d.error || '';
+      if (err.includes('article_code')) err = "Kod xatosi. Qayta urinib ko'ring";
+      else if (err.includes('not exist')) err = "Baza yangilanmoqda. 1 daqiqa kuting";
+      if (tg) tg.showAlert('❌ ' + err);
+      else alert('❌ ' + err);
+    }
+  }).catch(function(e){
+    btn.disabled=false; btn.textContent='💾 Saqlash';
+    var msg = e.message || '';
+    if (msg.includes('413') || msg.includes('Too Large')) msg = "Rasm hajmi juda katta! Kichikroq rasm tanlang";
+    else if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) msg = "Internet ulanishi yo'q. Qayta urinib ko'ring";
+    else if (msg.includes('500')) msg = "Server xatosi. Qayta urinib ko'ring";
+    else if (msg.includes('404')) msg = "Topilmadi";
+    if (tg) tg.showAlert('❌ ' + msg);
+    else alert('❌ ' + msg);
+  });
 }
 
 function showSuccessCard(pid, code, name, price, unit) {
