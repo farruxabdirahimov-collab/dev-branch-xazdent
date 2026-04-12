@@ -4633,7 +4633,7 @@ async def _accept_offers_handler(req):
             content_type="application/json", status=500)
 
 async def start_webserver():
-    app = _web.Application()
+    app = _web.Application(client_max_size=50*1024*1024)  # 50MB
     # ── GET /order ────────────────────────────────────────────────────
     app.router.add_get("/order", handle_order_page)
     app.router.add_get("/offer/{batch_id}", handle_offer_page)
@@ -5024,28 +5024,39 @@ async def start_webserver():
                 (shop["id"], name, price, unit, desc, main_cat, art_code, int(body.get("stock",0)))
             )
 
-            # Rasmlar — har biri Telegram ga yuboriladi
+            # Rasmlar — Telegram ga yuborib file_id saqlaymiz
             import base64 as _b64
             first_photo_id = None
+            all_photo_ids = []
+
+            # Birinchi navbat — botning o'z kanaliga yuboring (faqat saqlash uchun)
+            # Agar kanal bo'lmasa — adminga
+            storage_target = CHANNEL_ID if CHANNEL_ID else (ADMIN_IDS[0] if ADMIN_IDS else uid)
+
             for i, img_b64 in enumerate(images[:5]):
                 if not img_b64: continue
                 try:
+                    # base64 header ni olib tashlash
+                    if "," in img_b64:
+                        img_b64 = img_b64.split(",")[1]
                     img_bytes = _b64.b64decode(img_b64)
-                    buf = BufferedInputFile(img_bytes, filename=f"prod_{i}.jpg")
-                    # Rasmni faqat saqlash uchun — maxfiy chatga yuboramiz
-                    target = uid  # adminga emas, foydalanuvchining o'ziga
-                    sent = await bot.send_photo(target, buf,
-                        caption=f"📦 {name} — rasm saqlandi")
+                    buf = BufferedInputFile(img_bytes, filename=f"prod_{pid}_{i}.jpg")
+                    sent = await bot.send_photo(
+                        storage_target, buf,
+                        caption=f"#product_{pid} #{art_code} rasm {i+1}"
+                    )
                     fid = sent.photo[-1].file_id
+                    all_photo_ids.append(fid)
                     if not first_photo_id:
                         first_photo_id = fid
-                        await db_run("UPDATE products SET photo_file_id=? WHERE id=?", (fid, pid))
+                        await db_run(
+                            "UPDATE products SET photo_file_id=? WHERE id=?", (fid, pid))
                     await db_insert(
                         "INSERT INTO product_photos(product_id,file_id,sort_order) VALUES(?,?,?)",
                         (pid, fid, i)
                     )
                 except Exception as e:
-                    log.error(f"Photo upload xato: {e}")
+                    log.error(f"Photo upload xato ({i}): {e}")
 
             # Variantlar
             for v in variants:
@@ -5056,32 +5067,47 @@ async def start_webserver():
                     (pid, size, v.get("article",""), int(v.get("stock",0)))
                 )
 
-            # Kanalga post yuborish
+            # Kanalga post yuborish — barcha rasmlar bilan
             try:
-                prod_info = await db_get("SELECT * FROM products WHERE id=?", (pid,))
                 shop_info = await db_get("SELECT * FROM shops WHERE id=?", (shop["id"],))
-                ph_row = await db_get(
-                    "SELECT file_id FROM product_photos WHERE product_id=? ORDER BY sort_order LIMIT 1",
-                    (pid,))
-                link_url = f"https://t.me/XazdentBot?start=xz_{art_code}"
+                shop_name = shop_info["shop_name"] if shop_info else "?"
+                region    = shop_info["region"] if shop_info else ""
+                channel   = CHANNEL_ID if CHANNEL_ID else "@testxzd"
+                channel_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🛍 Ko\'rish va buyurtma →",
+                        url=f"https://t.me/XazdentBot?start=xz_{art_code}"
+                    )
+                ]])
                 caption = (
                     f"🆕 *Yangi mahsulot!*\n\n"
                     f"🦷 *{name}*\n"
                     f"📌 {art_code}\n"
                     f"💰 *{price:,.0f} so\'m/{unit}*\n"
-                    f"🏪 {shop_info['shop_name'] if shop_info else '?'} · "
-                    f"📍 {shop_info['region'] if shop_info else ''}\n\n"
+                    f"🏪 {shop_name} · 📍 {region}\n\n"
                     f"👆 Ko\'rish va buyurtma berish:"
                 )
-                channel = CHANNEL_ID if CHANNEL_ID else "@testxzd"
-                channel_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🛍 Ko'rish va buyurtma →",
-                                         url=f"https://t.me/XazdentBot?start=xz_{art_code}")
-                ]])
-                if ph_row and ph_row.get("file_id"):
-                    await bot.send_photo(channel, ph_row["file_id"],
-                                         caption=caption, reply_markup=channel_kb)
+
+                if len(all_photo_ids) > 1:
+                    # Ko'p rasm — media group
+                    from aiogram.types import InputMediaPhoto
+                    media = []
+                    for idx, fid in enumerate(all_photo_ids[:10]):
+                        if idx == 0:
+                            media.append(InputMediaPhoto(
+                                media=fid, caption=caption, parse_mode="Markdown"))
+                        else:
+                            media.append(InputMediaPhoto(media=fid))
+                    await bot.send_media_group(channel, media=media)
+                    # Havolani alohida yuboramiz
+                    await bot.send_message(channel, "👆 Buyurtma berish uchun:",
+                                          reply_markup=channel_kb)
+                elif all_photo_ids:
+                    # Bitta rasm
+                    await bot.send_photo(channel, all_photo_ids[0],
+                                        caption=caption, reply_markup=channel_kb)
                 else:
+                    # Rasmsiz
                     await bot.send_message(channel, caption, reply_markup=channel_kb)
             except Exception as ch_err:
                 log.error(f"Kanal post xato: {ch_err}")
