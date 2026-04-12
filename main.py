@@ -120,7 +120,21 @@ def kb_role(lg):
         [ib("🛒 Sotuvchi",          "role_seller")],
     )
 
-def kb_clinic(lg):
+def kb_clinic(lg, uid=0, webapp_url=""):
+    """Klinika klaviaturasi — Dental Market WebApp bilan."""
+    if webapp_url and uid:
+        mkt_url = f"{webapp_url}/catalog?uid={uid}&role=clinic"
+        return rk(
+            [KeyboardButton(text="🛍 Dental Market",
+                           web_app=WebAppInfo(url=mkt_url))],
+            [KeyboardButton(text="✏️ Buyurtma yozish"),
+             KeyboardButton(text="📩 Takliflar")],
+            [KeyboardButton(text="📋 Ehtiyojlarim"),
+             KeyboardButton(text="💰 Hisobim")],
+            [KeyboardButton(text="📊 Tejash"),
+             KeyboardButton(text="⚙️ Profil")],
+            [KeyboardButton(text="📖 Yordam")],
+        )
     return rk(
         [KeyboardButton(text="🛍 Dental Market")],
         [KeyboardButton(text="✏️ Buyurtma yozish"), KeyboardButton(text="📩 Takliflar")],
@@ -129,13 +143,27 @@ def kb_clinic(lg):
         [KeyboardButton(text="📖 Yordam")],
     )
 
-def kb_seller(lg):
+def kb_seller(lg, uid=0, webapp_url=""):
+    """Sotuvchi klaviaturasi — WebApp tugmalari bilan."""
+    if webapp_url and uid:
+        mkt_url = f"{webapp_url}/catalog?uid={uid}&role=seller"
+        add_url = f"{webapp_url}/catalog?uid={uid}&role=seller&action=add"
+        ord_url = f"{webapp_url}/catalog?uid={uid}&role=seller#orders"
+        return rk(
+            [KeyboardButton(text="🛍 Dental Market",
+                           web_app=WebAppInfo(url=mkt_url))],
+            [KeyboardButton(text="➕ Mahsulot qo\'shish",
+                           web_app=WebAppInfo(url=add_url)),
+             KeyboardButton(text="🔔 Buyurtmalar",
+                           web_app=WebAppInfo(url=ord_url))],
+            [KeyboardButton(text="👤 Profil")],
+        )
+    # Fallback — WebApp URL yo'q
     return rk(
         [KeyboardButton(text="🛍 Dental Market")],
-        [KeyboardButton(text="➕ Mahsulot qo\'shish"), KeyboardButton(text="📊 Statistika")],
-        [KeyboardButton(text="🔔 Buyurtmalar"),         KeyboardButton(text="📤 Takliflarim")],
-        [KeyboardButton(text="💰 Hisobim"),             KeyboardButton(text="⚙️ Profil")],
-        [KeyboardButton(text="📖 Yordam")],
+        [KeyboardButton(text="➕ Mahsulot qo\'shish"),
+         KeyboardButton(text="🔔 Buyurtmalar")],
+        [KeyboardButton(text="👤 Profil")],
     )
 
 def kb_regions(lg):
@@ -399,7 +427,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             return
 
         lg  = u["lang"] or "uz"
-        kb   = kb_clinic(lg) if u["role"] in ("clinic", "zubtex") else kb_seller(lg)
+        kb   = kb_clinic(lg, uid=uid, webapp_url=WEBAPP_URL) if u["role"] in ("clinic", "zubtex") else kb_seller(lg)
         role = u["role"]
         if role in ("clinic", "zubtex"):
             txt = "🏥 *Klinika paneli*"
@@ -544,10 +572,10 @@ async def _finish_reg(msg: Message, state: FSMContext):
     lg = await lang(msg.from_user.id)
     u  = await get_user(msg.from_user.id)
     if u["role"] in ("clinic", "zubtex"):
-        kb    = kb_clinic(lg)
+        kb    = kb_clinic(lg, uid=uid, webapp_url=WEBAPP_URL)
         panel = "🏥 *Klinika paneli*"
     else:
-        kb    = kb_seller(lg)
+        kb = kb_seller(lg, uid=uid, webapp_url=WEBAPP_URL)
         panel = "🛒 *Sotuvchi paneli*"
     await msg.answer(f"✅ Profil saqlandi!\n\n{panel}", reply_markup=kb)
 
@@ -3124,6 +3152,8 @@ async def cancel_photo_order(call: CallbackQuery, state: FSMContext):
 
 @router.message(F.text == "🛍 Dental Market")
 async def dental_market_btn(msg: Message):
+    """Dental Market — WebApp reply keyboard orqali ochiladi.
+    Bu handler faqat WebApp URL yo'q holatda ishlaydi (fallback)."""
     uid  = msg.from_user.id
     u    = await get_user(uid)
     role = u["role"] if u else "clinic"
@@ -3131,21 +3161,10 @@ async def dental_market_btn(msg: Message):
         await msg.answer("🛍 Dental Market hozircha ishlamayapti.")
         return
     url = f"{WEBAPP_URL}/catalog?uid={uid}&role={role}"
-    if role == "seller":
-        txt = (
-            "🛍 *Dental Market — Do\'koningiz*\n\n"
-            "Mahsulotlaringizni qo\'shing va klinikalar\n"
-            "sizning do\'koningizdan buyurtma bersin!"
-        )
-    else:
-        txt = (
-            "🛍 *Dental Market*\n\n"
-            "Stomatologik materiallar online do\'koni.\n"
-            "Eng yaxshi narxlar, tez yetkazib berish!"
-        )
-    await msg.answer(txt, reply_markup=ik(
-        [ib("🛍 Dental Market →", web_app=WebAppInfo(url=url))]
-    ))
+    await msg.answer(
+        "🛍 *XazDent Market*",
+        reply_markup=ik([ib("🛍 XazDent Market →", web_app=WebAppInfo(url=url))])
+    )
 
 @router.message(F.text == "✏️ Buyurtma yozish")
 async def buyurtma_yozish_btn(msg: Message):
@@ -3163,31 +3182,22 @@ async def buyurtma_yozish_btn(msg: Message):
 
 @router.message(F.text == "🔔 Buyurtmalar")
 async def seller_orders_btn(msg: Message):
-    """Sotuvchi uchun — kelgan buyurtmalar."""
-    uid  = msg.from_user.id
-    offs = await db_all(
-        "SELECT o.*, n.product_name, n.quantity, n.unit "
-        "FROM offers o JOIN needs n ON o.need_id=n.id "
-        "WHERE o.seller_id=? AND o.status='accepted' "
-        "ORDER BY o.created_at DESC LIMIT 10",
-        (uid,)
-    )
-    if not offs:
+    """Buyurtmalar — WebApp da ko'rinadi."""
+    uid = msg.from_user.id
+    if WEBAPP_URL:
+        url = f"{WEBAPP_URL}/catalog?uid={uid}&role=seller#orders"
         await msg.answer(
-            "📭 Hali qabul qilingan buyurtma yo\'q.\n\n"
-            "🔔 Ehtiyojlar bo\'limidan takliflar bering!"
+            "🔔 *Buyurtmalar*",
+            reply_markup=ik([ib("🔔 Buyurtmalarni ko\'rish →",
+                               web_app=WebAppInfo(url=url))])
         )
-        return
-    txt = f"🔔 *Qabul qilingan buyurtmalar:* {len(offs)} ta\n\n"
-    for o in offs[:5]:
-        txt += f"✅ *{o['product_name']}* — {o['quantity']} {o['unit']}\n"
-        txt += f"   💰 {o['price']:,.0f} so\'m\n\n"
-    await msg.answer(txt)
+    else:
+        await msg.answer("Buyurtmalar bo\'limi hozircha ishlamayapti.")
 
 @router.message(F.text == "➕ Mahsulot qo\'shish")
 async def seller_add_product_btn(msg: Message):
-    """Sotuvchi menyusidan to\'g\'ridan mahsulot qo\'shish."""
-    uid = msg.from_user.id
+    """Mahsulot qo'shish — WebApp reply keyboard orqali ochiladi (fallback)."""
+    uid  = msg.from_user.id
     shop = await db_get("SELECT * FROM shops WHERE owner_id=? AND status='active'", (uid,))
     if not shop:
         await msg.answer(
@@ -3200,7 +3210,7 @@ async def seller_add_product_btn(msg: Message):
         return
     url = f"{WEBAPP_URL}/catalog?uid={uid}&role=seller&action=add"
     await msg.answer(
-        "➕ *Mahsulot qo\'shish*\n\nRasm, narx va variantlarni kiriting:",
+        "➕ *Mahsulot qo\'shish*",
         reply_markup=ik([ib("➕ Mahsulot qo\'shish →", web_app=WebAppInfo(url=url))])
     )
 
@@ -4289,7 +4299,7 @@ async def fallback(msg: Message, state: FSMContext):
     u  = await get_user(msg.from_user.id)
     lg = (u["lang"] if u else None) or "uz"
     if u and u["role"] in ("clinic", "zubtex"):
-        await msg.answer("🏥 *Klinika paneli*", reply_markup=kb_clinic(lg))
+        await msg.answer("🏥 *Klinika paneli*", reply_markup=kb_clinic(lg, uid=uid, webapp_url=WEBAPP_URL))
     elif u and u["role"] == "seller":
         await msg.answer("🛒 *Sotuvchi paneli*", reply_markup=kb_seller(lg))
     else:
