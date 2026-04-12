@@ -1000,9 +1000,16 @@ function submitOrder() {
   fetch('/api/catalog/cart_order', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({items:items.map(function(it){
-      return {product_id:it.product.id, seller_id:it.product.seller_id,
-              qty:it.qty, variant:it.variantId||null,
-              price:it.product.price, name:it.product.name, unit:it.product.unit};
+      return {
+        product_id: it.product.id,
+        seller_id:  it.product.seller_id,
+        qty:        it.qty,
+        variant:    it.variantId || null,
+        price:      it.product.price,
+        name:       it.product.name,
+        unit:       it.product.unit,
+        shop_name:  it.product.shop_name || ''
+      };
     }), user_id:UID})
   }).then(function(r){return r.json();}).then(function(d){
     if (d.ok) {
