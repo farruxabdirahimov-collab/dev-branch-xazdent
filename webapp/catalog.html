@@ -289,11 +289,11 @@ body::after{
   background:rgba(0,0,0,.65);backdrop-filter:blur(8px);align-items:flex-end}
 .fpanel.on{display:flex}
 .fsheet{
-  background:linear-gradient(180deg,#FAFAFA,#EDF2F5);
+  background:#FAFAFA;
   border-radius:24px 24px 0 0;border-top:1px solid var(--glass-border);
   padding:20px;width:100%;max-height:94vh;overflow-y:auto}
-.ftitle{font-size:17px;font-weight:800;margin-bottom:16px;color:#1a1a3e}
-.flabel{font-size:11px;color:#888;font-weight:700;
+.ftitle{font-size:17px;font-weight:800;margin-bottom:16px;color:#1a1a3e !important}
+.flabel{font-size:11px;color:#444 !important;font-weight:700;
   text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
 .finp{width:100%;padding:12px 14px;border:1px solid var(--glass-border);
   border-radius:12px;font-size:15px;background:rgba(255,255,255,0.07);
@@ -341,13 +341,13 @@ body::after{
 .var-item .finp{margin-bottom:0;flex:1}
 .var-del{width:32px;height:38px;border:none;border-radius:8px;
   background:rgba(255,107,107,0.12);color:var(--red);font-size:14px;cursor:pointer;flex-shrink:0}
-.add-var-btn{width:100%;padding:10px;border:1px dashed rgba(79,172,254,0.4);
-  border-radius:12px;background:rgba(79,172,254,0.05);color:var(--accent1);
+.add-var-btn{width:100%;padding:10px;border:1px dashed rgba(11,207,4,0.4);
+  border-radius:12px;background:rgba(11,207,4,0.05);color:#0BCF04;
   font-size:13px;font-weight:600;cursor:pointer;margin-bottom:14px}
 .fsave{width:100%;padding:14px;border:none;border-radius:14px;
-  background:linear-gradient(357deg,#0F8ADB 18%,#444DCF 100%);
+  background:linear-gradient(180deg,#1EEB1E 0%,#0BCF04 100%);
   color:#fff;font-size:16px;font-weight:700;cursor:pointer;
-  box-shadow:0 6px 20px rgba(68,77,207,0.28);}
+  box-shadow:0 6px 20px rgba(11,207,4,0.35);}
 .fsave:active{transform:scale(.98)}
 .fsave:disabled{opacity:.4;box-shadow:none}
 .fcancel{width:100%;padding:12px;border:none;background:transparent;
@@ -603,9 +603,9 @@ function loadCatalog() {
               '<button class="share-btn" onclick="event.stopPropagation();shareProd('+p.id+')">📤</button>'+
               (ROLE!=='seller'?(
                 hasVars?
-                  '<button class="abtn" onclick="openDetail('+p.id+')" style="font-size:11px">🔎 Variant</button>':
+                  '<button class="abtn" onclick="openDetail('+p.id+')">⚡ Ko\'rish</button>':
                   '<div class="qty-row" id="qr-'+p.id+'" style="flex:1">'+renderQtyHtml(p.id,inCart)+'</div>'
-              ):'<button class="abtn" onclick="openDetail('+p.id+')" style="font-size:11px">👁 Ko\'rish</button>')+
+              ):'<button class="abtn" onclick="openDetail('+p.id+')">⚡ Ko\'rish</button>')+
             '</div>'+
           '</div></div>';
       });
