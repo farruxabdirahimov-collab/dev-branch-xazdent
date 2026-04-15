@@ -228,6 +228,124 @@ async def get_or_create_room(uid):
     )
     return await db_get("SELECT * FROM rooms WHERE id=?", (rid,))
 
+async def _handle_web_cart(msg: Message, state: FSMContext, u, cart_data: str):
+    """Web saytdan savat buyurtmasi. Format: 123x2,456x1"""
+    uid = msg.from_user.id
+
+    # Savat ma'lumotlarini parse qilish
+    items_raw = []
+    try:
+        for part in cart_data.split(','):
+            if 'x' in part:
+                pid, qty = part.split('x', 1)
+                items_raw.append({'pid': int(pid), 'qty': int(qty)})
+    except Exception:
+        items_raw = []
+
+    if not items_raw:
+        await msg.answer("⚠️ Savat bo'sh yoki xato. Qayta urinib ko'ring.")
+        return
+
+    # Ro'yxatdan o'tmagan bo'lsa
+    if not u or not u.get('phone') or not u.get('region'):
+        # Savatni state ga saqlaymiz
+        await state.update_data(web_cart=cart_data)
+        if not u:
+            await db_run(
+                "INSERT INTO users(id,username,full_name) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING",
+                (uid, msg.from_user.username, msg.from_user.full_name)
+            )
+        lg = 'uz'
+        await state.set_state(RegState.phone)
+        kb = rk([KeyboardButton(text="📱 Telefon yuborish", request_contact=True)], one_time=True)
+        await msg.answer(
+            "🛒 *Savatdagi buyurtmangiz tayyor!*\n\n"
+            "Buyurtmani rasmiylashtirish uchun\n"
+            "telefon raqamingizni yuboring:",
+            reply_markup=kb
+        )
+        return
+
+    # Ro'yxatdan o'tgan — buyurtmani yaratamiz
+    await _create_web_cart_order(msg, u, items_raw)
+
+async def _create_web_cart_order(msg, u, items_raw):
+    """Web cart dan buyurtma yaratish."""
+    uid = msg.from_user.id
+    uname = u.get("clinic_name") or u.get("full_name") or str(uid)
+    uphone = u.get("phone") or "—"
+    uregion = u.get("region") or "—"
+    import json as _pj2
+    seller_map = {}
+    for item in items_raw:
+        prod = await db_get(
+            "SELECT p.*, s.owner_id as seller_id, s.shop_name "
+            "FROM products p JOIN shops s ON p.shop_id=s.id WHERE p.id=?",
+            (item["pid"],)
+        )
+        if not prod: continue
+        sid = prod["seller_id"]
+        if sid not in seller_map:
+            seller_map[sid] = {"shop_name": prod["shop_name"], "items": []}
+        seller_map[sid]["items"].append({
+            "name": prod["name"], "qty": item["qty"],
+            "price": prod["price"], "unit": prod["unit"],
+            "product_id": prod["id"]
+        })
+    if not seller_map:
+        await msg.answer("Mahsulotlar topilmadi. Katalog yangilangan bolishi mumkin.")
+        return
+    sent = 0
+    for seller_id, data in seller_map.items():
+        items = data["items"]
+        total = sum(i["price"] * i["qty"] for i in items)
+        lines_list = []
+        for i, it in enumerate(items):
+            lines_list.append(
+                f"{i+1}. *{it['name']}* — {it['qty']} {it['unit']} x "
+                f"{fmt_price(it['price'])} = *{fmt_price(it['price']*it['qty'])} som*"
+            )
+        lines_txt = "\n".join(lines_list)
+        order_id = await db_insert(
+            "INSERT INTO catalog_orders(buyer_id,seller_id,products_json,total_amount) VALUES(?,?,?,?)",
+            (uid, seller_id, _pj2.dumps(items, ensure_ascii=False), total)
+        )
+        msg_txt = (
+            f"🌐 *Veb-saytdan buyurtma #{order_id}!*\n\n"
+            f"📦 *{data['shop_name']}:*\n{lines_txt}\n\n"
+            f"💰 *Jami: {fmt_price(total)} som*\n\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏥 *{uname}*\n"
+            f"📞 {uphone}\n"
+            f"📍 {uregion}"
+        )
+        confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Qabul qildim", callback_data=f"co_confirm_{order_id}_{uid}"),
+            InlineKeyboardButton(text="❌ Mavjud emas", callback_data=f"co_reject_{order_id}_{uid}")
+        ]])
+        try:
+            await bot.send_message(seller_id, msg_txt, reply_markup=confirm_kb)
+            sent += 1
+        except Exception as e:
+            log.error(f"Web cart seller notify: {e}")
+    lg = await lang(uid)
+    if not u.get("role") or u["role"] in (None,"none",""):
+        await db_run("UPDATE users SET role=? WHERE id=?", ("clinic", uid))
+        u2 = await get_user(uid)
+    else:
+        u2 = u
+    kb = kb_clinic(lg) if u2 and u2.get("role") in ("clinic","zubtex") else kb_seller(lg)
+    await msg.answer(
+        f"✅ *Buyurtmangiz yuborildi!*\n\n"
+        f"📦 {sent} ta sotuvchiga xabar ketdi.\n"
+        f"Sotuvchilar tez orada boglanadi.",
+        reply_markup=kb
+    )
+
+
+def fmt_price(n):
+    return f"{int(n):,}".replace(',', ' ')
+
 async def post_to_channel(need_id, need):
     """1 ta ehtiyoj uchun kanal posti (qayta post uchun)."""
     dl_map = {2:"2 soat",24:"24 soat",72:"3 kun",168:"1 hafta",240:"10 kun"}
@@ -390,6 +508,12 @@ async def cmd_start(msg: Message, state: FSMContext):
         except Exception as e:
             log.error(f"p_ deep link xato: {e}")
 
+    # Web saytdan savat buyurtmasi
+    if args.startswith("web_cart_"):
+        cart_data = args[9:]  # "web_cart_" dan keyin
+        await _handle_web_cart(msg, state, u, cart_data)
+        return
+
     if args.startswith("offer_") and u and u["role"] in ("seller",):
         try:
             nid = int(args.split("_")[1])
@@ -427,7 +551,7 @@ async def cmd_start(msg: Message, state: FSMContext):
             return
 
         lg  = u["lang"] or "uz"
-        kb   = kb_clinic(lg, uid=uid, webapp_url=WEBAPP_URL) if u["role"] in ("clinic", "zubtex") else kb_seller(lg)
+        kb   = kb_clinic(lg, uid=uid, webapp_url=WEBAPP_URL) if u["role"] in ("clinic", "zubtex") else kb_seller(lg, uid=uid, webapp_url=WEBAPP_URL)
         role = u["role"]
         if role in ("clinic", "zubtex"):
             txt = "🏥 *Klinika paneli*"
@@ -4301,7 +4425,8 @@ async def fallback(msg: Message, state: FSMContext):
     if u and u["role"] in ("clinic", "zubtex"):
         await msg.answer("🏥 *Klinika paneli*", reply_markup=kb_clinic(lg, uid=uid, webapp_url=WEBAPP_URL))
     elif u and u["role"] == "seller":
-        await msg.answer("🛒 *Sotuvchi paneli*", reply_markup=kb_seller(lg))
+        uid2 = msg.from_user.id
+        await msg.answer("🛒 *Sotuvchi paneli*", reply_markup=kb_seller(lg, uid=uid2, webapp_url=WEBAPP_URL))
     else:
         await msg.answer(t(lg, "welcome"), reply_markup=kb_lang())
 
@@ -5035,21 +5160,25 @@ async def start_webserver():
     async def _api_catalog(req):
         cat  = req.query.get("cat", "")
         q    = req.query.get("q", "").lower().strip()
+        params = []
+        # is_active ustuni yo'q bo'lishi mumkin — COALESCE bilan
+        where = "s.status='active'"
+        if cat:
+            where += " AND p.category_id=?"
+            params.append(int(cat))
+        if q:
+            where += " AND LOWER(p.name) LIKE ?"
+            params.append(f"%{q}%")
         query = (
             "SELECT p.*, s.shop_name, s.owner_id as seller_id, u.region "
             "FROM products p "
             "JOIN shops s ON p.shop_id=s.id "
             "JOIN users u ON s.owner_id=u.id "
-            "WHERE s.status='active' AND p.is_active=1"
+            "WHERE " + where +
+            " ORDER BY p.id DESC LIMIT 80"
         )
-        params = []
-        if cat:
-            query += " AND p.category_id=?"
-            params.append(int(cat))
-        query += " ORDER BY p.created_at DESC LIMIT 60"
         rows = await db_all(query, tuple(params))
-        if q:
-            rows = [r for r in rows if q in (r["name"] or "").lower()]
+        log.info(f"📋 Catalog API: cat={cat!r}, q={q!r}, natija={len(rows)} ta")
         cats = {1:"🦷 Terapevtik",2:"⚙️ Jarrohlik",3:"🔬 Zubtexnik",
                 4:"🧪 Dezinfeksiya",5:"💡 Uskunalar",6:"📸 Rentgen",
                 7:"🖥 CAD/CAM",8:"🦴 Implantlar",9:"💻 Stom Soft",10:"🎓 Kurslar"}
@@ -5060,7 +5189,7 @@ async def start_webserver():
                 "SELECT file_id FROM product_photos WHERE product_id=? ORDER BY sort_order",
                 (r["id"],))
             vars_rows = await db_all(
-                "SELECT size_name, article, stock FROM product_variants WHERE product_id=? ORDER BY id",
+                "SELECT size_name, article, stock, price FROM product_variants WHERE product_id=? ORDER BY id",
                 (r["id"],))
             data.append({
                 "id": r["id"], "name": r["name"], "price": r["price"],
@@ -5071,7 +5200,7 @@ async def start_webserver():
                 "description": r["description"] or "",
                 "article_code": r["article_code"] or "",
                 "photos": [f"/api/photo/{p['file_id']}" for p in photos_rows],
-                "variants": [{"size_name":v["size_name"],"article":v["article"],"stock":v["stock"]} for v in vars_rows]
+                "variants": [{"size_name":v["size_name"],"article":v["article"],"stock":v["stock"],"price":float(v["price"] or 0)} for v in vars_rows]
             })
         return _web.Response(
             text=_json.dumps({"products": data}, ensure_ascii=False),
@@ -5098,14 +5227,14 @@ async def start_webserver():
                 "SELECT file_id FROM product_photos WHERE product_id=? ORDER BY sort_order",
                 (r["id"],))
             vr_rows = await db_all(
-                "SELECT size_name, article, stock FROM product_variants WHERE product_id=? ORDER BY id",
+                "SELECT size_name, article, stock, price FROM product_variants WHERE product_id=? ORDER BY id",
                 (r["id"],))
             data.append({
                 "id":r["id"],"name":r["name"],"price":r["price"],"unit":r["unit"],
                 "stock":r["stock"] or 0,"is_active":r["is_active"],
                 "category": cats.get(r["category_id"] or 1,""),
                 "photos":[f"/api/photo/{p['file_id']}" for p in ph_rows],
-                "variants":[{"size_name":v["size_name"],"article":v["article"],"stock":v["stock"]} for v in vr_rows]
+                "variants":[{"size_name":v["size_name"],"article":v["article"],"stock":v["stock"],"price":float(v["price"] or 0)} for v in vr_rows]
             })
         return _web.Response(
             text=_json.dumps({"products": data}, ensure_ascii=False),
@@ -5143,7 +5272,8 @@ async def start_webserver():
             cat_id   = int(body.get("category_id", 1))
             unit     = body.get("unit","dona")
             desc     = body.get("description","") or ""
-            images   = body.get("images", [])   # list of base64
+            # JS dan "images" yoki "photos" key kelishi mumkin
+            images = body.get("images") or body.get("photos") or []
             variants = body.get("variants", [])  # [{size_name,article,stock}]
 
             if not name or price <= 0:
@@ -5173,28 +5303,32 @@ async def start_webserver():
             import base64 as _b64
             first_photo_id = None
             all_photo_ids = []
-
-            # Rasmni sotuvchining o'ziga yuboramiz — file_id olish uchun
-            # (Kanal uchun file_id keyinroq ishlatiladi)
             storage_target = uid
 
+            log.info(f"📸 Rasm soni: {len(images)}, photos_count={body.get('photos_count',0)}")
+
             for i, img_b64 in enumerate(images[:5]):
-                if not img_b64: continue
+                if not img_b64:
+                    log.warning(f"⚠️ Rasm {i} bo'sh, o'tkazildi")
+                    continue
                 try:
-                    # base64 prefiksini olib tashlash
+                    # JS dan faqat base64 (header siz) keladi
+                    # Lekin agar header bilan kelsa ham tozalaymiz
                     raw = img_b64
                     if "base64," in raw:
                         raw = raw.split("base64,")[1]
-                    elif "," in raw and len(raw.split(",")[0]) < 50:
+                    elif "," in raw and len(raw.split(",")[0]) < 60:
                         raw = raw.split(",")[1]
-                    # Padding tuzatish
-                    raw = raw.strip()
+                    raw = raw.strip().replace(" ", "+")
+                    # Padding
                     missing = len(raw) % 4
                     if missing:
                         raw += "=" * (4 - missing)
+                    log.info(f"📸 Rasm {i}: raw uzunligi={len(raw)}")
                     img_bytes = _b64.b64decode(raw)
-                    if len(img_bytes) < 100:
-                        log.warning(f"Rasm juda kichik ({i}), o'tkazildi")
+                    log.info(f"📸 Rasm {i}: bytes={len(img_bytes)}")
+                    if len(img_bytes) < 500:
+                        log.warning(f"⚠️ Rasm {i} juda kichik ({len(img_bytes)} bytes), o'tkazildi")
                         continue
                     buf = BufferedInputFile(img_bytes, filename=f"prod_{pid}_{i}.jpg")
                     sent = await bot.send_photo(
@@ -5211,17 +5345,18 @@ async def start_webserver():
                         "INSERT INTO product_photos(product_id,file_id,sort_order) VALUES(?,?,?)",
                         (pid, fid, i)
                     )
-                    log.info(f"✅ Rasm {i+1} saqlandi: {fid[:20]}...")
+                    log.info(f"✅ Rasm {i+1} saqlandi: {fid[:30]}...")
                 except Exception as e:
-                    log.error(f"❌ Photo upload xato ({i}): {e}")
+                    log.error(f"❌ Photo upload xato ({i}): {e}", exc_info=True)
 
             # Variantlar
             for v in variants:
                 size = (v.get("size_name") or "").strip()
                 if not size: continue
+                var_price = float(v.get("price") or 0)
                 await db_insert(
-                    "INSERT INTO product_variants(product_id,size_name,article,stock) VALUES(?,?,?,?)",
-                    (pid, size, v.get("article",""), int(v.get("stock",0)))
+                    "INSERT INTO product_variants(product_id,size_name,article,stock,price) VALUES(?,?,?,?,?)",
+                    (pid, size, v.get("article",""), int(v.get("stock",0)), var_price)
                 )
 
             # Kanalga post yuborish — barcha rasmlar bilan
@@ -5562,18 +5697,29 @@ async def start_webserver():
                 size = (it.get("size_name") or "").strip()
                 qty  = float(it.get("qty", 1) or 1)
                 if qty <= 0: continue
-                sub  = prod["price"] * qty
+                # Variant narxini topamiz
+                unit_price = float(prod["price"] or 0)
+                if size:
+                    vp_row = await db_get(
+                        "SELECT price FROM product_variants "
+                        "WHERE product_id=? AND size_name=?", (pid, size))
+                    if vp_row and vp_row["price"] and float(vp_row["price"]) > 0:
+                        unit_price = float(vp_row["price"])
+                sub  = unit_price * qty
                 total += sub
                 order_lines.append({
                     "name":     prod["name"],
                     "size":     size,
                     "qty":      qty,
-                    "price":    prod["price"],
+                    "price":    unit_price,
                     "unit":     prod["unit"],
                     "subtotal": sub
                 })
-                line = f"  • *{size}* — {qty:.0f} {prod['unit']}" if size else                        f"  • {qty:.0f} {prod['unit']}"
-                lines_txt += line + f" = {sub:,.0f} so\'m\n"
+                price_lbl = f"{unit_price:,.0f} so'm"
+                line = (f"  • *{size}* — {qty:.0f} {prod['unit']} x {price_lbl}"
+                        if size else
+                        f"  • {qty:.0f} {prod['unit']} x {price_lbl}")
+                lines_txt += line + f" = {sub:,.0f} so'm\n"
 
             if not order_lines:
                 return _web.Response(
@@ -5921,6 +6067,14 @@ async def start_webserver():
         return _web.Response(text="admin.html topilmadi", status=404)
     app.router.add_get("/admin", _admin_page)
 
+    async def _site_page(req):
+        path = os.path.join(BASE_DIR, "webapp", "site.html")
+        if os.path.exists(path):
+            return _web.FileResponse(path)
+        return _web.Response(text="site.html topilmadi", status=404)
+    app.router.add_get("/site", _site_page)
+    app.router.add_get("/", _site_page)
+
     async def _admin_excel_dl(req):
         if not int(req.query.get("uid",0)) in ADMIN_IDS:
             return _web.Response(text="ruxsat yo'q", status=403)
@@ -6220,6 +6374,122 @@ async def start_webserver():
             content_type="application/json",
             headers={"Access-Control-Allow-Origin":"*"})
     app.router.add_get("/api/admin/user_stats", _admin_user_stats)
+
+    # ── CATALOG ORDERS (admin) ─────────────────────────────────────────
+    async def _admin_catalog_orders(req):
+        if not int(req.query.get("uid",0)) in ADMIN_IDS:
+            return _web.Response(text=_json.dumps({"ok":False,"error":"ruxsat yo'q"}),
+                                 content_type="application/json",
+                                 headers={"Access-Control-Allow-Origin":"*"})
+        filter_uid = req.query.get("uid_filter") or req.query.get("uid")
+        # uid_filter — foydalanuvchi buyurtmalari uchun
+        uid_filter = int(req.query.get("uid_filter", 0)) if req.query.get("uid_filter") else 0
+
+        query = (
+            "SELECT co.*, "
+            "COALESCE(ub.clinic_name,ub.full_name,CAST(co.buyer_id AS TEXT)) as buyer_name, "
+            "COALESCE(us.clinic_name,us.full_name,CAST(co.seller_id AS TEXT)) as seller_name "
+            "FROM catalog_orders co "
+            "LEFT JOIN users ub ON co.buyer_id=ub.id "
+            "LEFT JOIN users us ON co.seller_id=us.id "
+            "WHERE 1=1"
+        )
+        params = []
+        if uid_filter:
+            query += " AND (co.buyer_id=? OR co.seller_id=?)"
+            params.extend([uid_filter, uid_filter])
+        query += " ORDER BY co.created_at DESC LIMIT 50"
+        rows = await db_all(query, tuple(params))
+        import json as _pj
+        data = []
+        for r in rows:
+            # Mahsulotlar qisqacha
+            try:
+                items = _pj.loads(r["products_json"] or "[]")
+                products_short = ", ".join([
+                    f"{it.get('name','?')} x{int(it.get('qty',1))}"
+                    for it in items[:2]
+                ])
+                if len(items) > 2:
+                    products_short += f" +{len(items)-2} ta"
+            except Exception:
+                products_short = "?"
+            data.append({
+                "id": r["id"],
+                "buyer_name": r["buyer_name"],
+                "seller_name": r["seller_name"],
+                "buyer_id": r["buyer_id"],
+                "seller_id": r["seller_id"],
+                "products_short": products_short,
+                "total_amount": r["total_amount"],
+                "status": r["status"],
+                "created_at": r["created_at"],
+            })
+        return _web.Response(
+            text=_json.dumps({"ok":True,"data":data}, ensure_ascii=False),
+            content_type="application/json",
+            headers={"Access-Control-Allow-Origin":"*"})
+    app.router.add_get("/api/admin/catalog_orders", _admin_catalog_orders)
+
+    # ── ADMIN PRODUCTS ────────────────────────────────────────────────
+    async def _admin_products(req):
+        if not int(req.query.get("uid",0)) in ADMIN_IDS:
+            return _web.Response(text=_json.dumps({"ok":False}),
+                                 content_type="application/json",
+                                 headers={"Access-Control-Allow-Origin":"*"})
+        rows = await db_all(
+            "SELECT p.*, s.shop_name "
+            "FROM products p JOIN shops s ON p.shop_id=s.id "
+            "ORDER BY p.created_at DESC LIMIT 100"
+        )
+        data = [{
+            "id": r["id"], "name": r["name"], "price": r["price"],
+            "unit": r["unit"], "shop_name": r["shop_name"],
+            "is_active": r["is_active"], "stock": r["stock"] or 0,
+            "article_code": r.get("article_code") or "",
+        } for r in rows]
+        return _web.Response(
+            text=_json.dumps({"ok":True,"data":data}, ensure_ascii=False),
+            content_type="application/json",
+            headers={"Access-Control-Allow-Origin":"*"})
+    app.router.add_get("/api/admin/products", _admin_products)
+
+    # ── BLOCK/UNBLOCK PRODUCT ─────────────────────────────────────────
+    async def _admin_block_product(req):
+        try:
+            body = await req.json()
+            if int(body.get("admin_id",0)) not in ADMIN_IDS:
+                return _web.Response(text=_json.dumps({"ok":False,"error":"ruxsat yo'q"}),
+                                     content_type="application/json")
+            pid   = int(body.get("product_id",0))
+            block = int(body.get("block",0))
+            await db_run("UPDATE products SET is_active=? WHERE id=?", (0 if block else 1, pid))
+            return _web.Response(text=_json.dumps({"ok":True}), content_type="application/json")
+        except Exception as e:
+            return _web.Response(text=_json.dumps({"ok":False,"error":str(e)}),
+                                 content_type="application/json")
+    app.router.add_post("/api/admin/block_product", _admin_block_product)
+
+    # ── USER BALANCE ──────────────────────────────────────────────────
+    async def _admin_user_balance(req):
+        if not int(req.query.get("uid",0)) in ADMIN_IDS:
+            return _web.Response(text=_json.dumps({"ok":False}),
+                                 content_type="application/json",
+                                 headers={"Access-Control-Allow-Origin":"*"})
+        target = int(req.query.get("uid_target", req.query.get("uid",0)))
+        u = await get_user(target)
+        total_paid = await db_get(
+            "SELECT COALESCE(SUM(amount),0) as s FROM transactions "
+            "WHERE user_id=? AND status='confirmed' AND type='topup'", (target,))
+        return _web.Response(
+            text=_json.dumps({
+                "ok": True,
+                "balance": float(u["balance"] or 0) if u else 0,
+                "total_paid": float(total_paid["s"] if total_paid else 0),
+            }),
+            content_type="application/json",
+            headers={"Access-Control-Allow-Origin":"*"})
+    app.router.add_get("/api/admin/user_balance", _admin_user_balance)
 
     # ── ADMIN STATS — PERIOD SUPPORT ──────────────────────────────────────
     async def _admin_orders(req):
