@@ -55,16 +55,13 @@ body{
 
 /* CATS — horizontal scroll, wrap emas */
 .cats{
-  display:flex;gap:6px;padding:10px 16px;
-  background:var(--card);border-bottom:1px solid var(--border);
-  overflow-x:auto;-webkit-overflow-scrolling:touch;
-  scrollbar-width:none;flex-wrap:nowrap}
-.cats::-webkit-scrollbar{display:none}
+  display:flex;flex-wrap:wrap;gap:5px;padding:8px 12px;
+  background:var(--card);border-bottom:1px solid var(--border);}
 .cat{
-  padding:6px 13px;border-radius:20px;border:1.5px solid var(--border);
-  font-size:12px;font-weight:500;cursor:pointer;
+  padding:5px 11px;border-radius:16px;border:1.5px solid var(--border);
+  font-size:11px;font-weight:500;cursor:pointer;
   background:var(--card);color:var(--hint);
-  white-space:nowrap;flex-shrink:0;transition:all .2s}
+  white-space:nowrap;transition:all .2s}
 .cat:active{transform:scale(.95)}
 .cat.on{background:var(--text);border-color:var(--text);color:#fff}
 
@@ -469,7 +466,7 @@ ROLE = _qp.get('role') || 'clinic';
 
 var cart = {}, curCat = '', curSearch = '', curView = 'catalog';
 var formPhotos = [], varCount = 0, _prods = {};
-var varSelections = {}, detPid = null, detProd = null, detQty = 1;
+var varSelections = {}, varPrices = {}, detPid = null, detProd = null, detQty = 1;
 
 // Category checkboxes
 document.querySelectorAll('.cat-chk').forEach(function(lbl) {
@@ -487,14 +484,38 @@ document.querySelectorAll('.cat-chk').forEach(function(lbl) {
   }
   var action = _qp.get('action');
   if (action === 'add' && ROLE === 'seller') {
-    loadCatalog(); setTimeout(openForm, 400);
+    loadCatalog();
+    setTimeout(function(){
+      var fp = document.getElementById('fpanel');
+      if (fp) fp.classList.add('on');
+    }, 800);
   } else {
     loadCatalog();
   }
 })();
 
+function minPriceStr(p){
+  if(!p.variants||!p.variants.length) return fmt(p.price);
+  var prices=[p.price];
+  p.variants.forEach(function(v){ if(v.price&&v.price>0) prices.push(v.price); });
+  return fmt(Math.min.apply(null,prices));
+}
+function filterVars(q) {
+  var rows = document.querySelectorAll('#var-list .var-multi-row');
+  var low = (q||'').toLowerCase();
+  rows.forEach(function(row){
+    var name = (row.dataset.vname||'').toLowerCase();
+    row.style.display = (!low || name.indexOf(low) > -1) ? '' : 'none';
+  });
+}
 function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function fmt(n){ return Math.round(n||0).toLocaleString(); }
+function minPrice(p){
+  if(!p.variants||!p.variants.length) return fmt(p.price);
+  var prices=[p.price];
+  p.variants.forEach(function(v){ if(v.price&&v.price>0) prices.push(v.price); });
+  return fmt(Math.min.apply(null,prices));
+}
 
 // ── VIEW ─────────────────────────────────────────────────────────────────────
 function showView(v, btn) {
@@ -544,7 +565,7 @@ function loadCatalog() {
                 (p.article_code?'<span class="pcode">'+esc(p.article_code)+'</span>':'')+
               '</div>'+
               '<div>'+
-                '<div class="pprice">'+fmt(p.price)+' <span class="punit">so\'m/'+esc(p.unit)+'</span></div>'+
+                '<div class="pprice">'+(hasVars?'<span style="font-size:10px;color:var(--hint);font-weight:400">dan </span>':'')+minPriceStr(p)+' <span class="punit">so\'m/'+esc(p.unit)+(hasVars?' ↑':'')+'</span></div>'+
                 '<div style="display:flex;gap:8px;align-items:center;margin-top:8px">'+
                   '<button class="abtn" onclick="openDetail('+p.id+')" style="font-size:13px">Ko\'rish</button>'+
                   '<button class="share-btn" onclick="event.stopPropagation();shareProd('+p.id+')">📤</button>'+
@@ -558,7 +579,7 @@ function loadCatalog() {
               '<div class="pname" onclick="openDetail('+p.id+')">'+esc(p.name)+'</div>'+
               '<div class="pshop">🏪 '+esc(p.shop_name||'?')+'</div>'+
               (p.article_code?'<span class="pcode">'+esc(p.article_code)+'</span>':'')+
-              '<div class="pprice">'+fmt(p.price)+' <span class="punit">so\'m/'+esc(p.unit)+'</span></div>'+
+              '<div class="pprice">'+(hasVars?'<span style="font-size:10px;color:var(--hint);font-weight:400">dan </span>':'')+minPriceStr(p)+' <span class="punit">so\'m/'+esc(p.unit)+(hasVars?' ↑':'')+'</span></div>'+
               '<div style="display:flex;gap:6px;align-items:center;margin-top:auto">'+
                 (ROLE!=='seller'?(
                   hasVars?
@@ -628,7 +649,7 @@ function onSearch(q) {
 // ── DETAIL ───────────────────────────────────────────────────────────────────
 function openDetail(pid) {
   var p = _prods[pid]; if (!p) return;
-  detPid = pid; detProd = p; detQty = 1; varSelections = {};
+  detPid = pid; detProd = p; detQty = 1; varSelections = {}; varPrices = {};
   var ds = document.getElementById('dsheet');
   var hasVars = p.variants && p.variants.length > 0;
 
@@ -636,7 +657,7 @@ function openDetail(pid) {
   var photos = p.photos && p.photos.length ? p.photos : [];
   var carHtml = '';
   if (photos.length > 1) {
-    carHtml = '<div class="carousel" id="det-car" ontouchstart="csStart(event)" ontouchmove="csMove(event)" ontouchend="csEnd()">'+
+    carHtml = '<div class="carousel" id="det-car" ontouchstart="csStart(event)" ontouchmove="csMove(event)" ontouchend="csEnd()" style="position:relative">'+
       '<div class="carousel-track" id="cs-track">'+
         photos.map(function(ph){
           return '<div class="carousel-slide"><img src="'+ph+'" onerror="this.parentNode.innerHTML=\'🦷\'"></div>';
@@ -644,7 +665,14 @@ function openDetail(pid) {
       '</div>'+
       '<div class="c-dots" id="cs-dots">'+
         photos.map(function(_,i){return '<div class="c-dot'+(i===0?' on':'')+'"></div>';}).join('')+
-      '</div></div>';
+      '</div>'+
+      '<button onclick="csPrev()" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);'+
+        'width:32px;height:32px;border:none;border-radius:50%;background:rgba(255,255,255,0.85);'+
+        'font-size:16px;cursor:pointer;z-index:5;display:flex;align-items:center;justify-content:center">‹</button>'+
+      '<button onclick="csNext()" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);'+
+        'width:32px;height:32px;border:none;border-radius:50%;background:rgba(255,255,255,0.85);'+
+        'font-size:16px;cursor:pointer;z-index:5;display:flex;align-items:center;justify-content:center">›</button>'+
+      '</div>';
   } else if (photos.length === 1) {
     carHtml = '<div class="carousel"><div class="carousel-slide"><img src="'+photos[0]+'" onerror="this.parentNode.innerHTML=\'🦷\'"></div></div>';
   } else {
@@ -654,24 +682,37 @@ function openDetail(pid) {
   // Variants
   var varsHtml = '';
   if (hasVars) {
+    var varCount = p.variants.length;
+    var varSearchHtml = varCount > 9 ?
+      '<input id="var-search" placeholder="🔍 Variant qidiring..." '+
+        'oninput="filterVars(this.value)" '+
+        'style="width:100%;padding:9px 12px;border:1.5px solid var(--border);'+
+        'border-radius:10px;font-size:14px;margin-bottom:8px;'+
+        'background:var(--bg);color:var(--text);outline:none;font-family:inherit">'+
+      '<div style="font-size:11px;color:var(--hint);margin-bottom:6px">'+varCount+' ta variant</div>'
+      : '';
     varsHtml = '<div class="var-label">Razmer / Variantlar:</div>'+
-      '<div style="border-radius:12px;overflow:hidden;border:1px solid var(--border);margin-bottom:14px">'+
+      varSearchHtml+
+      '<div id="var-list" style="border-radius:12px;overflow:hidden;border:1px solid var(--border);margin-bottom:14px;max-height:320px;overflow-y:auto">'+
       p.variants.map(function(v){
         var ok = v.stock > 0;
-        return '<div class="var-multi-row">'+
+        var vPrice = (v.price&&v.price>0)?v.price:detProd.price;
+        return '<div class="var-multi-row" data-vname="'+esc(v.size_name||'')+'">'+
           '<div class="var-multi-info">'+
             '<div class="var-multi-name">'+esc(v.size_name||'')+(v.article?' <span style="font-size:10px;color:var(--hint)">'+esc(v.article)+'</span>':'')+'</div>'+
-            (ok?'<div class="var-multi-stock">✅ '+v.stock+' ta mavjud</div>':'<div class="var-multi-stock" style="color:var(--red)">❌ Tugagan</div>')+
+            '<div style="font-size:12px;font-weight:700;color:var(--btn)">'+fmt(vPrice)+' so'm</div>'+
+            (ok?'<div class="var-multi-stock">✅ '+v.stock+' ta</div>':'<div class="var-multi-stock" style="color:var(--red)">❌ Tugagan</div>')+
           '</div>'+
           '<div class="var-multi-ctrl">'+
             '<button class="vmbtn" onclick="varMinus(\''+esc(v.size_name)+'\')">−</button>'+
             '<span class="vmnum" id="vn-'+esc(v.size_name)+'">0</span>'+
-            '<button class="vmbtn" onclick="varPlus(\''+esc(v.size_name)+'\''+(ok?','+v.stock:',0')+')">+</button>'+
+            '<button class="vmbtn" '+(ok?'onclick="varPlus(\''+esc(v.size_name)+'\','+v.stock+','+vPrice+')"':'disabled style="opacity:.4"')+'>+</button>'+
           '</div>'+
         '</div>';
       }).join('')+
       '</div>'+
-      '<div id="var-total" style="font-size:13px;color:var(--btn);font-weight:600;margin-bottom:10px;text-align:right"></div>';
+      '<div id="var-total" style="font-size:13px;color:var(--btn);font-weight:600;margin-bottom:10px;text-align:right"></div>'+
+      '<div id="var-price-hint" style="font-size:12px;color:var(--hint);margin-bottom:6px"></div>';
   }
 
   // Buyer actions
@@ -728,27 +769,32 @@ function closeDpBg(e){ if(e.target===document.getElementById('dpanel')) closeDp(
 function dQty(d){ detQty=Math.max(1,detQty+d); document.getElementById('det-qty-n').textContent=detQty; }
 
 // Variant ctrl
-window.varPlus = function(name, maxStock) {
+window.varPlus = function(name, maxStock, price) {
   if (!varSelections[name]) varSelections[name] = 0;
   if (maxStock > 0 && varSelections[name] >= maxStock) return;
   if (maxStock === 0) return; // Tugagan
   varSelections[name]++;
+  if (price && price > 0) varPrices[name] = price;
   updVarUI(name);
 };
 window.varMinus = function(name) {
   if (!varSelections[name] || varSelections[name] <= 0) return;
   varSelections[name]--;
-  if (!varSelections[name]) delete varSelections[name];
+  if (!varSelections[name]) { delete varSelections[name]; delete varPrices[name]; }
   updVarUI(name);
 };
 function updVarUI(name) {
   var el = document.getElementById('vn-'+name);
   var qty = varSelections[name] || 0;
   if (el) { el.textContent = qty; el.classList.toggle('active', qty > 0); }
-  var total = 0, price = detProd ? detProd.price : 0;
-  Object.values(varSelections).forEach(function(q){ total += q; });
+  // Narxlar bo'yicha jami
+  var total = 0;
+  Object.keys(varSelections).forEach(function(n){
+    var pr = varPrices[n] || (detProd ? detProd.price : 0);
+    total += pr * varSelections[n];
+  });
   var tel = document.getElementById('var-total');
-  if (tel) tel.textContent = total > 0 ? 'Jami: '+total+' dona · '+fmt(price*total)+' so\'m' : '';
+  if (tel) tel.textContent = total > 0 ? '💰 Jami: '+fmt(total)+' so'm' : '';
 }
 
 function detAddCart() {
@@ -759,9 +805,11 @@ function detAddCart() {
     if (!keys.length) { alert('Kamida bitta variant tanlang!'); return; }
     keys.forEach(function(name) {
       var key = detPid+'_v_'+name;
-      cart[key] = {product:p, variantId:name, qty:varSelections[name], key:key};
+      var pr = varPrices[name] || p.price;
+      var pCopy = Object.assign({}, p, {price: pr});
+      cart[key] = {product:pCopy, variantId:name, qty:varSelections[name], key:key};
     });
-    varSelections = {};
+    varSelections = {}; varPrices = {};
   } else {
     cart[detPid] = {product:p, qty:detQty};
   }
@@ -776,7 +824,7 @@ function detQuick() {
   if (hasVars) {
     var keys = Object.keys(varSelections);
     if (!keys.length) { alert('Kamida bitta variant tanlang!'); return; }
-    keys.forEach(function(name){ items.push({size_name:name, qty:varSelections[name]}); });
+    keys.forEach(function(name){ items.push({size_name:name, qty:varSelections[name], price:varPrices[name]||0}); });
   } else {
     items.push({size_name:null, qty:detQty});
   }
@@ -826,6 +874,22 @@ function initCarousel() {
   var track = document.getElementById('cs-track');
   if (track) track.style.transform = 'translateX(0)';
   updDots();
+}
+function csPrev(){
+  var track=document.getElementById('cs-track');
+  if(!track) return;
+  var slides=track.children.length;
+  csIdx=Math.max(0,csIdx-1);
+  track.style.transform='translateX(-'+csIdx*100+'%)';
+  document.querySelectorAll('.c-dot').forEach(function(d,i){d.classList.toggle('on',i===csIdx);});
+}
+function csNext(){
+  var track=document.getElementById('cs-track');
+  if(!track) return;
+  var slides=track.children.length;
+  csIdx=Math.min(slides-1,csIdx+1);
+  track.style.transform='translateX(-'+csIdx*100+'%)';
+  document.querySelectorAll('.c-dot').forEach(function(d,i){d.classList.toggle('on',i===csIdx);});
 }
 function csStart(e){ csX0 = e.touches[0].clientX; }
 function csMove(e){ e.preventDefault(); }
@@ -1001,37 +1065,37 @@ function closeForm() {
 function triggerPhoto() { document.getElementById('photo-inp').click(); }
 
 function onPhoto(inp) {
-  if (!inp.files[0]) return;
+  var file = inp.files && inp.files[0];
+  if (!file) return;
   if (formPhotos.length >= 5) { alert('Maksimum 5 ta rasm!'); return; }
+  inp.value = '';
   var reader = new FileReader();
   reader.onload = function(e) {
-    compressImg(e.target.result, function(compressed) {
-      formPhotos.push({dataUrl:e.target.result, compressed:compressed});
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.createElement('canvas');
+      var MAX = 1000;
+      var w = img.width, h = img.height;
+      if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; }
+      if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; }
+      canvas.width = w; canvas.height = h;
+      var ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      var compressed = canvas.toDataURL('image/jpeg', 0.80);
+      formPhotos.push(compressed); // to'liq dataUrl saqlaydi
       renderPhotoRow();
-    });
+    };
+    img.src = e.target.result;
   };
-  reader.readAsDataURL(inp.files[0]);
-  inp.value = '';
-}
-
-function compressImg(src, cb) {
-  var img = new Image();
-  img.onload = function() {
-    var cv = document.createElement('canvas');
-    var max = 1000, w = img.width, h = img.height;
-    if (w > max) { h = h*max/w; w = max; }
-    if (h > max) { w = w*max/h; h = max; }
-    cv.width = w; cv.height = h;
-    cv.getContext('2d').drawImage(img, 0, 0, w, h);
-    cb(cv.toDataURL('image/jpeg', 0.75));
-  };
-  img.src = src;
+  reader.readAsDataURL(file);
 }
 
 function renderPhotoRow() {
   var row = document.getElementById('photos-row');
   var html = formPhotos.map(function(ph, i) {
-    return '<div class="photo-thumb"><img src="'+ph.dataUrl+'"><button class="del-ph" onclick="delPhoto('+i+')">✕</button></div>';
+    return '<div class="photo-thumb"><img src="'+ph+'"><button class="del-ph" onclick="delPhoto('+i+')">✕</button></div>';
   }).join('');
   if (formPhotos.length < 5) {
     html += '<div class="add-photo-btn" onclick="triggerPhoto()"><span>📷</span><span>Rasm qo\'sh</span></div>';
@@ -1047,73 +1111,68 @@ function addVarRow() {
   row.className = 'var-item';
   row.id = 'vr-'+id;
   row.innerHTML =
-    '<input class="finp" id="vs-'+id+'" placeholder="Razmer (masalan: 4008)">' +
-    '<input class="finp" id="va-'+id+'" placeholder="Artikul (ixtiyoriy)" style="flex:.8">' +
-    '<input class="finp" id="vq-'+id+'" placeholder="Stok" type="number" style="flex:.5">' +
+    '<div style="display:flex;gap:4px;flex:1;flex-wrap:wrap">'+
+      '<input class="finp" id="vs-'+id+'" placeholder="Razmer (Propilen 50sm 1ig)" style="min-width:120px;flex:2;margin-bottom:4px">'+
+      '<input class="finp" id="vp-'+id+'" placeholder="Narx (so'm)" type="number" style="min-width:80px;flex:1;margin-bottom:4px">'+
+      '<input class="finp" id="vq-'+id+'" placeholder="Stok" type="number" style="min-width:60px;flex:.7;margin-bottom:4px">'+
+      '<input class="finp" id="va-'+id+'" placeholder="Artikul" style="min-width:70px;flex:.8;margin-bottom:4px">'+
+    '</div>'+
     '<button class="var-del" onclick="this.parentNode.remove()">✕</button>';
   document.getElementById('var-editor').appendChild(row);
 }
 
 function saveProduct() {
-  var name = document.getElementById('f-name').value.trim();
-  var price = parseFloat(document.getElementById('f-price').value);
-  var unit = document.getElementById('f-unit').value;
-  var stock = parseInt(document.getElementById('f-stock').value)||0;
-  var desc = document.getElementById('f-desc').value.trim();
-
-  // Kategoriyalar
-  var cats = Array.from(document.querySelectorAll('.cat-chk input:checked')).map(function(i){return parseInt(i.value);});
-
+  console.log('[SP] uid='+UID+' photos='+formPhotos.length);
+  var name = (document.getElementById('f-name')||{value:''}).value.trim();
+  var price = parseFloat((document.getElementById('f-price')||{value:'0'}).value)||0;
+  var unit = (document.getElementById('f-unit')||{value:'dona'}).value||'dona';
+  var stock = parseInt((document.getElementById('f-stock')||{value:'0'}).value)||0;
+  var desc = (document.getElementById('f-desc')||{value:''}).value.trim();
+  var cats = Array.from(document.querySelectorAll('.cat-chk input:checked')).map(function(c){return parseInt(c.value);});
+  console.log('[SP] name='+name+' price='+price+' cats='+cats.length);
+  if (!UID) { alert('UID=0. Botni qayta oching!'); return; }
   if (!name) { alert('Mahsulot nomini kiriting!'); return; }
-  if (!price || price <= 0) { alert('Narxni kiriting!'); return; }
-  if (!cats.length) { alert('Kamida bitta yo\'nalish tanlang!'); return; }
-
-  // Variantlar
-  var variants = [];
-  document.querySelectorAll('.var-item').forEach(function(row) {
-    var id = row.id.split('-')[1];
-    var size = document.getElementById('vs-'+id);
-    var art = document.getElementById('va-'+id);
-    var qty = document.getElementById('vq-'+id);
-    if (size && size.value.trim()) {
-      variants.push({size_name:size.value.trim(), article:art?art.value.trim():'', stock:qty?parseInt(qty.value)||0:0});
-    }
+  if (!price||price<=0) { alert('Narxni kiriting!'); return; }
+  if (!cats.length) { alert("Yo'nalish tanlang!"); return; }
+  var variants=[];
+  document.querySelectorAll('.var-item').forEach(function(row){
+    var id=row.id.replace('vr-','');
+    var s=document.getElementById('vs-'+id);
+    var a=document.getElementById('va-'+id);
+    var q=document.getElementById('vq-'+id);
+    var vp=document.getElementById('vp-'+id);
+    if(s&&s.value.trim()) variants.push({
+      size_name:s.value.trim(),
+      article:a?a.value.trim():'',
+      stock:q?parseInt(q.value)||0:0,
+      price:vp?parseFloat(vp.value)||0:0
+    });
   });
-
-  var btn = document.getElementById('fsave');
-  btn.disabled = true; btn.textContent = '⏳ Saqlanmoqda...';
-
-  fetch('/api/catalog/add_product', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      user_id:UID, name:name, price:price, unit:unit,
-      stock:stock, description:desc,
-      category_id:cats[0], categories:cats,
-      photos:formPhotos.map(function(p){return p.compressed;}),
-      variants:variants
-    })
-  }).then(function(r){return r.json();}).then(function(d){
-    btn.disabled = false; btn.textContent = '💾 Saqlash';
-    if (d.ok) {
-      closeForm();
-      showSuccessCard(d.product_id, d.article_code, name, price, unit);
-      loadMy();
-    } else {
-      var err = d.error || '';
-      if (err.includes('article_code')) err = "Kod xatosi. Qayta urinib ko'ring";
-      else if (err.includes('not exist')) err = "Baza yangilanmoqda. 1 daqiqa kuting";
-      if (tg) tg.showAlert('❌ ' + err);
-      else alert('❌ ' + err);
-    }
+  // formPhotos - to'liq dataUrl (data:image/jpeg;base64,...)
+  // API ga faqat base64 qismini yuboramiz
+  var images64=formPhotos.map(function(ph){
+    if (typeof ph === 'string' && ph.indexOf(',') > -1) return ph.split(',')[1];
+    return ph || '';
+  }).filter(function(x){return x && x.length > 10;});
+  console.log('[SP] images count='+images64.length);
+  var payload={user_id:UID,name:name,price:price,unit:unit,stock:stock,
+    description:desc,category_id:cats[0],categories:cats,
+    images:images64,variants:variants};
+  var btn=document.getElementById('fsave');
+  btn.disabled=true; btn.textContent='⏳ Saqlanmoqda...';
+  fetch('/api/catalog/add_product',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload)
+  }).then(function(r){console.log('[SP] status='+r.status);return r.json();})
+  .then(function(d){
+    btn.disabled=false; btn.textContent='💾 Saqlash';
+    console.log('[SP] ok='+d.ok+' err='+d.error);
+    if(d.ok){closeForm();showSuccessCard(d.product_id,d.article_code,name,price,unit);loadCatalog();loadMy();}
+    else{alert('❌ '+(d.error||'Xato'));}
   }).catch(function(e){
     btn.disabled=false; btn.textContent='💾 Saqlash';
-    var msg = e.message || '';
-    if (msg.includes('413') || msg.includes('Too Large')) msg = "Rasm hajmi juda katta! Kichikroq rasm tanlang";
-    else if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) msg = "Internet ulanishi yo'q. Qayta urinib ko'ring";
-    else if (msg.includes('500')) msg = "Server xatosi. Qayta urinib ko'ring";
-    else if (msg.includes('404')) msg = "Topilmadi";
-    if (tg) tg.showAlert('❌ ' + msg);
-    else alert('❌ ' + msg);
+    console.error('[SP] catch:',e);
+    alert('❌ '+(e.message||'Xato'));
   });
 }
 
